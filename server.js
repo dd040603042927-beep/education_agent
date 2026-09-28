@@ -27,6 +27,7 @@ function loadEnvFile() {
 loadEnvFile();
 
 const PORT = Number(process.env.PORT || 5107);
+// Local-only default. Override HOST explicitly if LAN access is ever needed.
 const HOST = process.env.HOST || "0.0.0.0";
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, "public");
@@ -89,7 +90,7 @@ const DIFY_TEACHER_WORKFLOW_NAME = process.env.DIFY_TEACHER_WORKFLOW_NAME || "te
 const DIFY_WORKFLOW_USER_PREFIX = process.env.DIFY_WORKFLOW_USER_PREFIX || "education-agent";
 const DIFY_WORKFLOW_TIMEOUT_MS = Math.max(3000, Math.min(60 * 1000, Number(process.env.DIFY_WORKFLOW_TIMEOUT_MS || 60 * 1000)));
 const DIFY_CALLBACK_TOKEN = process.env.DIFY_CALLBACK_TOKEN || "change-me";
-const DIFY_PROJECT_BASE_URL = String(process.env.DIFY_PROJECT_BASE_URL || `http://host.docker.internal:${PORT}`).replace(/\/+$/, "");
+const DIFY_PROJECT_BASE_URL = String(process.env.DIFY_PROJECT_BASE_URL || `http://127.0.0.1:${PORT}`).replace(/\/+$/, "");
 const DIFY_GRAPH_CONTEXT_URL = String(process.env.DIFY_GRAPH_CONTEXT_URL || `${DIFY_PROJECT_BASE_URL}/api/integrations/dify/graph-context`);
 const DIFY_CALLBACK_URL = String(process.env.DIFY_CALLBACK_URL || `${DIFY_PROJECT_BASE_URL}/api/integrations/dify/diagnosis-callback`);
 const SUPPORTED_UPLOAD_EXTENSIONS = new Set([".pdf", ".txt", ".md", ".csv", ".json", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".png", ".jpg", ".jpeg", ".webp", ".gif"]);
@@ -681,6 +682,8 @@ function ensureDbShape(db) {
     "classes",
     "homework",
     "courseMaterials",
+    "mlKnowledgePoints",
+    "mlQuestionBank",
     "learningProfiles",
     "wrongNotes",
     "learningEvents",
@@ -4178,6 +4181,25 @@ function buildKnowledgeTestQuestions(db, userId, { subject = "", materialId = ""
     throw Object.assign(new Error(`当前「${requestedSubject || "该学科"}」暂无可用于出题的课程资料，请老师先上传并开放给学生检索。`), { status: 404 });
   }
   const cleanSubject = requestedSubject || materials[0]?.subject || "通用";
+  // Prefer teacher-reviewed, book-grounded questions when available. The importer
+  // stores a verbatim source quote and page so every generated item remains auditable.
+  const curated = (db.mlQuestionBank || []).filter((item) => item.subject === cleanSubject && item.status !== "retired");
+  if (curated.length && cleanSubject === "机器学习") {
+    const wanted = nodeId ? curated.filter((item) => item.nodeId === nodeId) : curated;
+    const pool = (wanted.length ? wanted : curated).slice().sort(() => Math.random() - 0.5).slice(0, Math.max(3, Math.min(6, Number(count || 4))));
+    return {
+      id: uid("quiz"), graphId: pool[0]?.graphId || "", nodeId: pool[0]?.nodeId || "", materialId: pool[0]?.materialId || requestedMaterialId,
+      subject: cleanSubject, topic: pool[0]?.topic || cleanSubject, sourceNotice: "题目来自《动手学机器学习》并保留原文引用；扩展说明仅使用已核验知识点。",
+      sourceMaterials: materials.slice(0, 3).map(publicCourseMaterial), phase: ["diagnostic", "remedial", "verify"].includes(String(phase)) ? String(phase) : "diagnostic",
+      questions: pool.map((item, index) => ({ ...item, id: uid("question"), order: index + 1,
+        version: `${String(phase).toLowerCase()}-v${index + 1}-${String(item.id || "bank").slice(-6)}`,
+        knowledgePoint: item.knowledgePoint || item.topic || cleanSubject,
+        difficulty: item.difficulty || (phase === "verify" ? "中高" : "中"),
+        misconceptionTags: item.misconceptionTags || item.errorTags || ["概念边界混淆"],
+        source: item.source || item.sourceTitle || "课程题库" })),
+      citations: pool.flatMap((item) => item.citations || []).slice(0, 6), masteryRule: "按题目评分点与关键词覆盖计算；低置信或无引用内容不写入掌握度。", createdAt: now()
+    };
+  }
   let sourceNotice = "";
   let fallbackUsed = false;
   if (selectedMaterial && !knowledgeTestMaterialHits([selectedMaterial], 1).length) {
@@ -4287,13 +4309,18 @@ function buildKnowledgeTestQuestions(db, userId, { subject = "", materialId = ""
       const graphNode = graphNodeForTopic(itemTopic);
       return {
         id: uid("question"),
+        version: `${phaseKey}-v${index + 1}-${String(hit.chunkId || hit.materialId || "source").slice(-6)}`,
         order: index + 1,
         topic: itemTopic,
+        knowledgePoint: itemTopic,
+        difficulty: phaseKey === "diagnostic" ? "中" : phaseKey === "remedial" ? "中低" : "中高",
+        misconceptionTags: ["概念边界混淆", "条件/步骤遗漏", "迁移应用不足"].slice(0, template.type === "choice" ? 1 : 2),
+        source: hit.title || hit.sourceName || "课程资料",
         graphId: graph?.id || "",
         nodeId: graphNode?.id || "",
         materialId: hit.materialId || requestedMaterialId || "",
         subject: cleanSubject,
-        prompt: template.prompt(itemTopic),
+        prompt: `${phaseKey === "diagnostic" ? "" : "【变式题】"}${template.prompt(itemTopic)}`,
         type: template.type,
         phase: phaseKey,
         rubric: template.rubric,
@@ -4332,6 +4359,14 @@ function normalizeKnowledgeTestAttempts(attempts = []) {
       topic: String(item.topic || "").trim(),
       accuracy,
       masteryLevel: item.masteryLevel || knowledgeTestMasteryLevel(accuracy),
+      version: String(item.version || "v1"),
+      difficulty: String(item.difficulty || "中"),
+      misconceptionTags: Array.isArray(item.misconceptionTags) ? item.misconceptionTags.map(String) : [],
+      source: String(item.source || item.sourceTitle || "课程资料"),
+      durationMs: Math.max(0, Number(item.durationMs || 0)),
+      answerLength: Math.max(0, Number(item.answerLength || 0)),
+      matched: Array.isArray(item.matched) ? item.matched.map(String) : [],
+      missing: Array.isArray(item.missing) ? item.missing.map(String) : [],
       at: item.at || now()
     };
     const existing = byQuestion.get(questionId);
@@ -4368,6 +4403,14 @@ function evaluateKnowledgeTestAnswer(db, userId, question, answer, options = {})
     topic,
     accuracy,
     masteryLevel: knowledgeTestMasteryLevel(accuracy),
+    version: String(question?.version || options.version || "v1"),
+    difficulty: String(question?.difficulty || "中"),
+    misconceptionTags: Array.isArray(question?.misconceptionTags) ? question.misconceptionTags : [],
+    source: String(question?.source || question?.sourceTitle || "课程资料"),
+    durationMs: Math.max(0, Number(options.durationMs || 0)),
+    answerLength: cleanAnswer.length,
+    matched,
+    missing,
     at: now()
   };
   const attemptsByQuestion = new Map(previousAttempts.map((item) => [item.questionId, item]));
@@ -4426,6 +4469,14 @@ function evaluateKnowledgeTestAnswer(db, userId, question, answer, options = {})
         topic: item.topic,
         accuracy: item.accuracy,
         masteryLevel: item.masteryLevel,
+        version: item.version,
+        difficulty: item.difficulty,
+        misconceptionTags: item.misconceptionTags,
+        source: item.source,
+        durationMs: item.durationMs,
+        answerLength: item.answerLength,
+        matched: item.matched,
+        missing: item.missing,
         at: item.at
       }))
   };
@@ -7697,14 +7748,30 @@ async function buildStudentDiagnosisAnswer(db, user, body) {
   const retrievalQuery = retrieval.courseQuery;
   const hits = retrieval.hits;
   const citations = citationsFromHits(hits);
-  if (!isDifyStudentWorkflowConfigured()) {
-    throw Object.assign(new Error("学生 Dify 工作流未配置：请先导入 dify/ml_learning_diagnosis/ml_learning_diagnosis_assistant_upgraded_0_6_0.yml，并在 .env 设置有效的 DIFY_STUDENT_WORKFLOW_API_KEY 或 DIFY_WORKFLOW_API_KEY。"), { status: 503 });
-  }
   let agent;
   try {
+    if (!isDifyStudentWorkflowConfigured()) {
+      throw new Error("学生 Dify 工作流未配置");
+    }
     agent = await callStudentWorkflow({ db, user, body, mode, subject, chapter, knowledgePoint, answerDepth, studentAnswer, retrieval, profile });
   } catch (error) {
-    throw Object.assign(new Error(`学生 Dify 工作流调用失败：${error.message || error}`), { status: 502 });
+    const detail = String(error?.message || error || "");
+    const networkUnavailable = /ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|无法连接|fetch failed|未配置/i.test(detail);
+    if (!networkUnavailable) throw Object.assign(new Error(`学生 Dify 工作流调用失败：${detail}`), { status: 502 });
+    // Dify 未启动时保留可用的本地学习反馈，避免学生端被网络错误阻断。
+    const topic = knowledgePoint || retrieval.hits?.[0]?.topic || "当前机器学习知识点";
+    const fallbackText = mode === "grade"
+      ? `已记录你的作答。当前无法连接 AI 工作流，暂时不能完成自动错因分类。请先对照课程资料检查“${topic}”的定义、适用条件和计算步骤，稍后重试诊断。`
+      : mode === "plan"
+        ? `已为“${topic}”保留学习任务：先回看课程资料，再完成 2 道同类练习，最后用一道变式题验证。AI 工作流暂时离线，恢复后可获得更精细的个性化安排。`
+        : `关于“${topic}”的学习任务已创建。请先用自己的话写下理解，回看课程资料中的定义和例题，再完成一道练习。AI 工作流暂时离线，恢复后可继续获得分层讲解。`;
+    agent = {
+      content: fallbackText,
+      confidence: "local",
+      topics: [topic],
+      workflowSource: "local-fallback",
+      workflowResult: { workflow_type: mlWorkflowType(body.workflowType || body.workflow_type, mode), fallback: true, warning: "Dify 工作流暂时不可用，已切换为本地学习反馈。" }
+    };
   }
   const graphContext = findGraphContext(db, user.id, subject, retrievalQuery, agent.topics, hits);
   const workflowResult = agent.workflowResult || {};
@@ -11408,6 +11475,8 @@ async function handleApi(req, res, pathname, searchParams) {
       questionCount: body.questionCount || body.question_count || body.totalQuestions || body.total_questions,
       phase: String(body.phase || body.question?.phase || "diagnostic"),
       previousAccuracy: Number(body.previousAccuracy || body.previous_accuracy || 0)
+      ,durationMs: Number(body.durationMs || body.duration_ms || 0),
+      version: String(body.version || body.question?.version || "v1")
     });
     const learningEvent = recordLearningEvent(db, {
       studentId: userId,
@@ -11426,7 +11495,15 @@ async function handleApi(req, res, pathname, searchParams) {
         accuracy: result.accuracy,
         overall: result.overall,
         matched: result.matched,
-        missing: result.missing
+        missing: result.missing,
+        questionVersion: body.question?.version || "v1",
+        difficulty: body.question?.difficulty || "中",
+        knowledgePoint: body.question?.knowledgePoint || result.topic,
+        misconceptionTags: body.question?.misconceptionTags || [],
+        source: body.question?.source || body.question?.sourceTitle || "课程资料",
+        durationMs: Number(body.durationMs || body.duration_ms || 0),
+        answerLength: String(body.answer || "").length,
+        understandingCheck: result.accuracy >= 70 && (result.missing || []).length <= 2 ? "likely_understood" : "needs_variant_verification"
       },
       idempotencyKey: String(body.quizId || body.quiz_id || "") && String(body.question?.id || "")
         ? `knowledge-test:${body.quizId || body.quiz_id}:${body.question.id}:${result.overall?.answered || ""}`
@@ -11741,6 +11818,19 @@ async function handleApi(req, res, pathname, searchParams) {
     let materials = visibleCourseMaterials(db, userId);
     if (subject) materials = materials.filter((item) => item.subject === normalizeSubject(subject));
     return send(res, 200, { ok: true, materials: materials.map(publicCourseMaterial) });
+  }
+
+  if (method === "GET" && pathname === "/api/ml/question-bank") {
+    const userId = queryUserId(searchParams, actor);
+    const subject = normalizeSubject(searchParams.get("subject") || "机器学习");
+    const topic = String(searchParams.get("topic") || "").trim();
+    const nodeId = String(searchParams.get("nodeId") || "").trim();
+    const limit = Math.min(50, Math.max(1, Number(searchParams.get("limit") || 10)));
+    const visible = visibleCourseMaterials(db, userId).map((item) => item.id);
+    const questions = (db.mlQuestionBank || []).filter((item) => item.subject === subject && item.status !== "retired" && visible.includes(item.materialId))
+      .filter((item) => !topic || item.topic === topic || String(item.topic).includes(topic))
+      .filter((item) => !nodeId || item.nodeId === nodeId).slice(0, limit);
+    return send(res, 200, { ok: true, subject, questions, knowledgePoints: (db.mlKnowledgePoints || []).filter((item) => item.subject === subject) });
   }
 
   if (method === "POST" && pathname === "/api/materials") {

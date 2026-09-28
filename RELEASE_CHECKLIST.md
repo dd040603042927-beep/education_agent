@@ -17,7 +17,7 @@
 - RAG 检索增强：课程资料分块增加本地语义指纹，检索采用关键词召回、向量相似度、章节/标题加权和多来源重排。
 - 作业批改闭环：作业支持 rubric，AI 只给建议分和分项反馈，教师确认后才写入正式成绩、学习画像和错题。
 - 备份脚本：新增 `npm run backup`，备份 `data/` 和 `logs/` 到 `backups/`。
-- 部署入口：新增 `.env` 自动加载、Dockerfile、Docker Compose 和 `DEPLOYMENT.md`。
+- 部署入口：使用 `.env` 自动加载和 `DEPLOYMENT.md`，仅支持本地 Node.js 启动。
 - 最小烟测：`npm test` 会启动测试服务，验证健康检查、登录态、越权阻断、恶意上传拦截和 AI 对话结构。
 
 ## 仍需继续推进的 P0 项

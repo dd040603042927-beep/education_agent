@@ -48,6 +48,7 @@ const state = {
   aiInsightTab: "workflow",
   cycleSettingsOpen: false,
   cycleViewMode: "",
+  cycleWizardStep: 0,
   modelSubject: "",
   modelMode: "ideal",
   modelComponents: [],
@@ -245,14 +246,17 @@ function iconSvg(name, label = "") {
   return `<svg class="app-icon" viewBox="0 0 24 24" aria-hidden="${label ? "false" : "true"}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${title}${path}</svg>`;
 }
 
+const CASE_NAME = "知学伴";
+const CASE_TAGLINE = "面向机器学习课程的 AI 学习诊断与个性化干预智能体";
+
 const teacherMenus = [
-  { key: "ai", icon: "bot", label: "AI 助教", section: "教学" },
-  { key: "homework", icon: "clipboard", label: "作业管理", section: "教学" },
-  { key: "graph", icon: "network", label: "知识图谱", section: "资源" },
-  { key: "materials", icon: "files", label: "课程资料", section: "资源" },
-  { key: "models", icon: "lab", label: "模型实验室", section: "资源" },
-  { key: "classes", icon: "users", label: "班级管理", section: "管理" },
-  { key: "chat", icon: "message", label: "师生消息", section: "沟通" },
+  { key: "ai", icon: "bot", label: "学情诊断助手", section: "核心闭环" },
+  { key: "homework", icon: "clipboard", label: "错题与练习", section: "核心闭环" },
+  { key: "graph", icon: "network", label: "知识点路径", section: "核心闭环" },
+  { key: "classes", icon: "users", label: "班级学情", section: "核心闭环" },
+  { key: "materials", icon: "files", label: "课程资料", section: "支撑资源" },
+  { key: "models", icon: "lab", label: "算法实验（扩展）", section: "支撑资源" },
+  { key: "chat", icon: "message", label: "师生消息（扩展）", section: "支撑资源" },
   { key: "profile", icon: "user", label: "个人信息", section: "账户" }
 ];
 
@@ -261,15 +265,16 @@ const adminMenus = [
 ];
 
 const studentMenus = [
-  { key: "home", icon: "home", label: "学习周期驾驶舱", section: "学习" },
-  { key: "ai", icon: "bot", label: "AI 诊断与审辩", section: "学习" },
-  { key: "graph", icon: "network", label: "我的学习路径", section: "学习" },
-  { key: "portfolio", icon: "files", label: "学习证据档案", section: "学习" },
-  { key: "showcase", icon: "clipboard", label: "学习周期申报", section: "学习" },
-  { key: "courses", icon: "school", label: "我的课程", section: "学习" },
-  { key: "homework", icon: "clipboard", label: "节点练习/作业", section: "学习" },
-  { key: "models", icon: "lab", label: "学习作品/实验", section: "资源" },
-  { key: "chat", icon: "message", label: "站内消息", section: "沟通" },
+  { key: "home", icon: "home", label: "诊断驾驶舱", section: "核心闭环" },
+  { key: "ai", icon: "bot", label: "错因诊断助手", section: "核心闭环" },
+  { key: "partner", icon: "school", label: "机器学习学习伙伴", section: "核心闭环" },
+  { key: "graph", icon: "network", label: "知识图谱", section: "核心闭环" },
+  { key: "homework", icon: "clipboard", label: "个性化练习", section: "核心闭环" },
+  { key: "portfolio", icon: "files", label: "学习证据档案", section: "学习结果" },
+  { key: "showcase", icon: "clipboard", label: "学习周期申报", section: "学习结果" },
+  { key: "courses", icon: "school", label: "我的课程", section: "学习结果" },
+  { key: "models", icon: "lab", label: "算法实验（扩展）", section: "扩展功能" },
+  { key: "chat", icon: "message", label: "站内消息（扩展）", section: "扩展功能" },
   { key: "profile", icon: "user", label: "个人信息", section: "账户" }
 ];
 
@@ -1351,7 +1356,7 @@ function renderNavSections(menus) {
 
 function renderBottomNav(menus) {
   const quickKeys = state.user?.role === "student"
-    ? ["home", "ai", "graph", "portfolio", "homework"]
+    ? ["home", "ai", "partner", "graph", "homework"]
     : ["ai", "graph", "homework", "models", "chat"];
   const items = quickKeys.map((key) => menus.find((item) => item.key === key)).filter(Boolean);
   if (!items.length) return "";
@@ -1360,7 +1365,7 @@ function renderBottomNav(menus) {
       ${items.map((item) => `
         <button class="${state.page === item.key ? "active" : ""}" data-page="${item.key}" title="${escapeHtml(item.label)}">
           ${iconSvg(item.icon, item.label)}
-          <span>${escapeHtml(item.key === "homework" ? "作业" : item.key === "graph" ? "图谱" : item.key === "chat" ? "消息" : item.key === "portfolio" ? "档案" : item.key === "home" ? "首页" : item.label.replace(" 助教", ""))}</span>
+          <span>${escapeHtml(item.key === "homework" ? "练习" : item.key === "graph" ? "图谱" : item.key === "chat" ? "消息" : item.key === "portfolio" ? "档案" : item.key === "partner" ? "伙伴" : item.key === "home" ? "首页" : item.label.replace(" 助教", ""))}</span>
         </button>
       `).join("")}
     </nav>
@@ -1372,13 +1377,13 @@ function renderAuth() {
     <main class="auth-shell">
       <section class="auth-visual">
         <div class="brand-mark">🧠</div>
-        <h1>智学伴</h1>
-        <p>教师端与学生端共用一套账号体系，注册时选择身份，系统自动分配 8 位 ID。</p>
+        <h1>${CASE_NAME}</h1>
+        <p>${CASE_TAGLINE}。服务某高校人工智能/计算机专业机器学习课程，围绕“诊断—纠错—练习—复测”形成学习闭环。</p>
         <div class="auth-points">
-          <span>知识图谱</span>
-          <span>AI 对话</span>
-          <span>模型构建</span>
-          <span>班级作业</span>
+          <span>找出薄弱知识点</span>
+          <span>解释每道错题原因</span>
+          <span>生成个性化练习</span>
+          <span>帮助教师分层干预</span>
         </div>
       </section>
       <section class="auth-panel">
@@ -1389,7 +1394,7 @@ function renderAuth() {
         <form id="loginForm" class="auth-form">
           <label>账号 ID 或姓名<input name="account" autocomplete="username" placeholder="建议使用 8 位 ID，重名用户必须用 ID" required /></label>
           <label>密码<input name="password" type="password" autocomplete="current-password" placeholder="请输入账号密码" required /></label>
-          <button class="primary wide" type="submit">进入平台</button>
+          <button class="primary wide" type="submit">进入学习案例</button>
           <p class="hint">2 天内刷新页面会自动保持登录。用户名允许重复，系统分配的 8 位 ID 永远唯一。</p>
           <p class="hint">忘记密码或需要开通学校账号时，请联系平台管理员重置。</p>
         </form>
@@ -1404,7 +1409,7 @@ function renderAuth() {
             </select>
           </label>
           <label id="registerExtraLabel">任教学科（选填）<input name="extra" placeholder="例如：数学、物理、机器学习" /></label>
-          <button class="primary wide" type="submit">注册并进入平台</button>
+          <button class="primary wide" type="submit">注册并开始诊断</button>
           <p id="registerResult" class="auth-result hidden"></p>
           <p class="hint">注册后系统会自动分配 8 位 ID 并直接登录，请记住侧边栏显示的 ID。</p>
         </form>
@@ -1511,7 +1516,7 @@ function renderShell() {
     <div class="layout ${state.navOpen ? "drawer-open" : ""}">
       <header class="mobile-topbar">
         <div>
-          <strong>智学伴</strong>
+          <strong>${CASE_NAME}</strong>
           <span>${escapeHtml(roleName(state.user.role))} · ${escapeHtml(identity)}</span>
         </div>
         <button type="button" id="mobileMenuBtn" title="打开菜单">${iconSvg("menu", "菜单")}</button>
@@ -1521,7 +1526,7 @@ function renderShell() {
         <div class="side-brand">
           <div class="brand-lockup">
             <span class="brand-logo">${iconSvg("school")}</span>
-            <strong>智学伴</strong>
+            <strong>${CASE_NAME}</strong>
           </div>
           <div class="side-identity">
             <span>${escapeHtml(state.user.name)}（${roleName(state.user.role)}）</span>
@@ -1660,6 +1665,7 @@ function renderContent() {
   document.body?.classList.toggle("graph-page-maximized", state.page === "graph" && state.graphMaximized);
   const contentClasses = ["content"];
   if (state.page === "ai") contentClasses.push("ai-content");
+  if (state.page === "partner") contentClasses.push("ai-content", "partner-content");
   if (state.page === "graph") contentClasses.push("graph-content");
   if (state.page === "models") contentClasses.push("model-content");
   if (state.page === "models" && state.modelSubject === "机器学习") contentClasses.push("ml-model-content");
@@ -1678,6 +1684,7 @@ function renderContent() {
     home: renderHomePage,
     graph: renderGraphPage,
     ai: renderAiPage,
+    partner: renderStudentPartnerPage,
     materials: renderMaterialsPage,
     courses: renderStudentCoursesPage,
     portfolio: renderStudentPortfolioPage,
@@ -1699,6 +1706,7 @@ function bindCurrentPage() {
     home: bindHomePage,
     graph: bindGraphPage,
     ai: bindAiPage,
+    partner: bindAiPage,
     materials: bindMaterialsPage,
     courses: bindStudentCoursesPage,
     portfolio: bindStudentPortfolioPage,
@@ -1773,8 +1781,8 @@ function renderTeacherHomePage() {
     <div class="workbench-page teacher-home-workbench">
     <section class="workbench-title">
       <div>
-        <h2>教学工作台</h2>
-        <p>今日待办、课程资产、作业批改和学生问题集中在同一个页面。</p>
+        <h2>机器学习课程学情工作台</h2>
+        <p>围绕某高校班级的“薄弱点—错因—练习”闭环，帮助教师及时完成分层干预。</p>
       </div>
       <div class="actions compact-actions">
         <button class="primary" data-dashboard-page="materials">上传资料</button>
@@ -2115,6 +2123,47 @@ function renderCycleCompletionCard(cycle = {}) {
         <span>${Number(report.misconceptionChange?.wrongNotes || 0)} 条错因记录</span>
         <span>${Number(report.citationSummary?.count || 0)} 条引用来源</span>
       </div>` : ""}
+    </section>
+  `;
+}
+
+function renderLearningCycleWizard(cycle = {}, portfolio = currentStudentPortfolio()) {
+  const counts = cycle.evidenceCounts || {};
+  const tasks = Array.isArray(cycle.tasks) ? cycle.tasks : [];
+  const task = (key) => tasks.find((item) => item.key === key) || {};
+  const hasPlan = !cycle.virtual && (cycle.goals || []).length > 0 && ((cycle.focusNodes || []).length || (cycle.recommendedTestNodes || []).length);
+  const steps = [
+    { key: 1, label: "课程与主题", short: "选择", done: hasPlan, task: task("goals"), next: "选择课程、知识主题并保存本轮目标" },
+    { key: 2, label: "完成前测", short: "前测", done: Number(counts.knowledgeTests || 0) >= 1, task: task("pretest"), next: "独立完成一次前测，留下原始掌握度与误区" },
+    { key: 3, label: "AI 诊断与路径", short: "诊断", done: Number(counts.aiDialogues || 0) > 0 && (Number(counts.nodeAnnotations || 0) + Number(counts.learningCards || 0) > 0), task: task("aiGraph"), next: "带着原始答案向 AI 追问，再打开图谱路径" },
+    { key: 4, label: "补救练习与订正", short: "补救", done: Number(counts.wrongNotes || 0) + Number(counts.corrections || 0) >= Math.max(1, Number(cycle.evidenceRequirements?.wrongFixes || 1)), task: task("wrongFix"), next: "完成变式练习，写下错因与修正后的理解" },
+    { key: 5, label: "后测、反思与作品", short: "收束", done: Number(counts.knowledgeTests || 0) >= 2 && Number(counts.reflections || 0) > 0 && Number(counts.learningOutputs || 0) > 0, task: task("postReflection"), next: "完成后测，提交反思和一个可展示的学习作品" }
+  ];
+  const firstIncomplete = steps.findIndex((item) => !item.done);
+  const activeIndex = Math.max(1, Math.min(5, Number(state.cycleWizardStep || (firstIncomplete === -1 ? 5 : firstIncomplete + 1))));
+  const active = steps[activeIndex - 1];
+  const evidence = [
+    `已产生：${Number(counts.knowledgeTests || 0)} 次测试`,
+    `${Number(counts.aiDialogues || 0)} 次 AI 对话`,
+    `${Number(counts.wrongNotes || 0) + Number(counts.corrections || 0)} 条订正`,
+    `${Number(counts.reflections || 0)} 份反思`,
+    `${Number(counts.learningOutputs || 0)} 个作品`
+  ];
+  const missing = active.done ? "本阶段完成，可进入下一步。" : (active.task.gap || active.next);
+  const action = activeIndex === 1 ? `<button class="primary" type="button" data-cycle-settings-open>选择课程与主题</button>` : `<button class="primary" type="button" data-dashboard-page="${escapeHtml(active.task.page || (activeIndex === 3 ? "ai" : "portfolio"))}">${escapeHtml(activeIndex === 2 ? "开始前测" : activeIndex === 3 ? "开始 AI 诊断" : activeIndex === 4 ? "进入订正" : "完成后测与反思")}</button>`;
+  return `
+    <section class="panel cycle-wizard" aria-label="学习周期五步向导">
+      <div class="cycle-wizard-head">
+        <div><span class="cycle-eyebrow">LEARNING CYCLE WIZARD</span><h2>一步一步完成本轮学习</h2><p>${escapeHtml(cycle.title || "还没有学习周期")} · 当前阶段：<strong>${escapeHtml(active.label)}</strong></p></div>
+        <span class="cycle-wizard-progress">${steps.filter((item) => item.done).length}/5 完成</span>
+      </div>
+      <nav class="cycle-wizard-steps" aria-label="学习周期阶段">
+        ${steps.map((item) => `<button type="button" class="${item.key === activeIndex ? "active" : ""} ${item.done ? "done" : ""}" data-cycle-wizard-step="${item.key}"><b>${item.done ? "✓" : item.key}</b><span>${item.label}</span></button>`).join("")}
+      </nav>
+      <div class="cycle-wizard-body">
+        <div class="cycle-wizard-main"><span class="cockpit-section-label">第 ${activeIndex} 步 · ${active.label}</span><h3>${escapeHtml(active.done ? "这一阶段已完成" : active.next)}</h3><p class="cycle-wizard-condition"><strong>完成条件：</strong>${escapeHtml(active.task.evidence || (activeIndex === 1 ? "保存课程、知识主题和至少一个学习目标" : active.next))}</p>${action}<button class="mini" type="button" data-cycle-wizard-next ${activeIndex >= 5 ? "disabled" : ""}>${active.done && activeIndex < 5 ? "进入下一步" : "稍后继续"}</button></div>
+        <aside class="cycle-wizard-aside"><div><strong>已产生的证据</strong>${evidence.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div><div class="cycle-wizard-missing"><strong>还缺什么</strong><span>${escapeHtml(missing)}</span></div></aside>
+      </div>
     </section>
   `;
 }
@@ -2476,12 +2525,14 @@ function renderStudentHomePage() {
     <div class="workbench-page student-home-workbench learning-cycle-home ml-cockpit-home">
       <section class="ml-cockpit-heading">
         <div>
-          <span class="cycle-eyebrow">机器学习个性化学习驾驶舱</span>
-          <h2>你好，${escapeHtml(state.user?.name || "同学")}。让诊断决定下一步学习。</h2>
-          <p>当前围绕“学什么、卡在哪里、下一步做什么”组织你的学习路径与成效证据。</p>
+          <span class="cycle-eyebrow">${CASE_TAGLINE}</span>
+          <h2>你好，${escapeHtml(state.user?.name || "同学")}。先找出薄弱点，再练到会。</h2>
+          <p>本案例只聚焦三件事：定位知识薄弱点、解释错题原因、生成下一步个性化练习。</p>
         </div>
         <button class="mini" type="button" data-cycle-settings-open>调整学习周期</button>
       </section>
+
+      ${renderLearningCycleWizard(cycle, portfolio)}
 
       <section class="ml-cockpit-top-grid">
         <article class="panel ml-current-task-card">
@@ -2535,7 +2586,7 @@ function renderStudentHomePage() {
         </article>
       </section>
 
-      <details class="secondary-content disclosure-panel">
+      <details class="secondary-content disclosure-panel" ${state.cycleSettingsOpen ? "open" : ""}>
         <summary>查看本轮完整计划与证据任务</summary>
         <div class="disclosure-body">
           ${renderLearningCycleEditor(cycle)}
@@ -3029,6 +3080,16 @@ function bindLearningCycleForms() {
     const tasks = Array.isArray(item.tasks) && item.tasks.length ? `：${item.tasks.join("；")}` : "";
     return `${item.week || ""}${item.title ? `：${item.title}` : ""}${tasks}`;
   }).join("\n");
+  document.querySelectorAll("[data-cycle-wizard-step]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.cycleWizardStep = Number(button.dataset.cycleWizardStep || 1);
+      renderContent();
+    });
+  });
+  document.querySelector("[data-cycle-wizard-next]")?.addEventListener("click", () => {
+    state.cycleWizardStep = Math.min(5, Number(state.cycleWizardStep || 1) + 1);
+    renderContent();
+  });
   const fillCycleForm = (form, item = {}) => {
     if (!form || !item) return;
     const setValue = (name, value) => {
@@ -3432,8 +3493,8 @@ function renderMachineLearningModuleMap(graph) {
     <section class="ml-graph-focus-header">
       <div class="ml-graph-focus-copy">
         <span class="cycle-eyebrow">《机器学习》课程专属图谱</span>
-        <h2>我的学习路径</h2>
-        <p>围绕六个核心模块，按掌握度、错因风险和前置依赖生成最短补弱路径。</p>
+        <h2>知识图谱</h2>
+        <p>以《动手学机器学习》章节为主线，查看知识节点、前置依赖、掌握度与错因关系。</p>
       </div>
       <div class="ml-graph-path-callout">
         <span>当前推荐路径</span>
@@ -3441,6 +3502,7 @@ function renderMachineLearningModuleMap(graph) {
         <small>不是固定章节顺序，而是根据你的学习证据动态调整。</small>
       </div>
     </section>
+    <div class="ml-graph-quickbar"><span><b>${(graph.nodes || []).length}</b> 个知识节点</span><span><b>${(graph.links || []).length}</b> 条学习关系</span><span><b>18</b> 个教材章节</span><span>来源：${escapeHtml(graph.sourceName || "《动手学机器学习》")}</span><button type="button" class="mini primary" data-graph-node-filter="weak">优先看薄弱点</button></div>
     <section class="ml-module-map" aria-label="机器学习六大模块">
       ${ML_GRAPH_MODULES.map((module, index) => {
         const stats = machineLearningModuleStats(graph, module);
@@ -3762,16 +3824,10 @@ function renderStudentGraphPage() {
   const graphs = graphListForCurrentRole().filter((graph) => isMachineLearningGraph(graph));
   const selected = graphs.find((graph) => graph.id === state.selectedGraphId) || machineLearningGraph(graphs);
   if (selected) return renderGraphDetailShell(graphs, selected, "student");
-  const tab = state.studentGraphTab || "library";
   return `
     <section class="panel student-graph-full student-graph-home">
-      <div class="product-tabs student-graph-tabs">
-        ${[
-          ["library", "图谱库"],
-          ["test", "知识测试"]
-        ].map(([key, label]) => `<button type="button" class="${tab === key ? "active" : ""}" data-student-graph-tab="${key}">${label}</button>`).join("")}
-      </div>
-      ${tab === "test" ? renderStudentKnowledgeTestTab(graphs) : renderStudentGraphLibraryTab(graphs)}
+      <div class="graph-only-empty-head"><span class="cycle-eyebrow">《动手学机器学习》</span><h2>知识图谱</h2><p>当前还没有可用图谱，请先开放课程图谱。</p></div>
+      ${renderStudentGraphLibraryTab(graphs)}
     </section>
     ${renderGraphNodeModal()}
   `;
@@ -3782,11 +3838,9 @@ function renderGraphDetailShell(graphs, selected, mode = "teacher") {
   const detailOpen = Boolean(graphExplicitSelectedNode(selected));
   const shellClass = state.graphMaximized ? "graph-maximized" : "";
   return `
-    <section class="panel graph-detail-shell graph-dashboard-shell graph-atlas-shell graph-focus-shell ${detailOpen ? "detail-open" : "detail-collapsed"} ${mode === "student" ? "student-graph-detail-shell" : "teacher-graph-detail-shell"} ${shellClass}" data-graph-atlas-shell="${escapeHtml(selected.id)}">
-      ${mode === "student" ? renderMachineLearningModuleMap(selected) : ""}
-      ${mode === "student" ? renderStudentGraphPathSummary(selected) : ""}
+    <section class="panel graph-detail-shell graph-dashboard-shell graph-atlas-shell graph-focus-shell ${mode === "student" ? "student-graph-only-shell" : ""} ${detailOpen ? "detail-open" : "detail-collapsed"} ${mode === "student" ? "student-graph-detail-shell" : "teacher-graph-detail-shell"} ${shellClass}" data-graph-atlas-shell="${escapeHtml(selected.id)}">
       ${mode === "teacher" ? renderTeacherMlGraphEditor(selected) : ""}
-      ${renderGraphAtlasNav(selected)}
+      ${mode === "teacher" ? renderGraphAtlasNav(selected) : ""}
       <div class="graph-atlas-main">
         ${renderGraphAtlasFilterbar(selected, stats)}
         <div class="graph-atlas-workbench">
@@ -4056,6 +4110,7 @@ function renderStudentKnowledgeTestTab() {
   }[phase];
   const currentQuestionNode = question?.nodeId ? (state.data?.knowledgeGraphs || []).flatMap((graph) => graph.nodes || []).find((node) => node.id === question.nodeId) : null;
   const latestAccuracy = Number(test.result?.accuracy || test.previousAccuracy || 0);
+  const comparisonNote = phase === "verify" ? "本阶段使用不同题面与新场景，难度保持在中高，专门验证迁移理解。" : phase === "diagnostic" ? "前测将作为同一知识点的基线，后测会使用不同版本题目进行对比。" : "补救题围绕同一知识点和错因标签生成。";
   return `
     <div class="diagnostic-practice-shell">
       <section class="practice-stage-header">
@@ -4072,7 +4127,7 @@ function renderStudentKnowledgeTestTab() {
       <nav class="practice-stage-tabs" aria-label="练习阶段">
         ${Object.entries(phaseMeta ? { diagnostic: phaseMeta, remedial: { label: "补救性练习", hint: "根据错因生成最多 4 道同类辨析与变式迁移题。" }, verify: { label: "验证性练习", hint: "完成补救后，用新题验证错因是否真正消除。" } } : {}).map(([key, item]) => `<button type="button" class="${phase === key ? "active" : ""}" data-practice-phase="${key}"><strong>${item.label}</strong><span>${item.hint}</span></button>`).join("")}
       </nav>
-      <section class="practice-stage-intro"><strong>${phaseMeta.label}</strong><span>${phaseMeta.hint}</span><em>最多 3–5 题</em></section>
+      <section class="practice-stage-intro"><strong>${phaseMeta.label}</strong><span>${phaseMeta.hint}</span><em>最多 3–5 题</em><small>${comparisonNote}</small></section>
       <div class="knowledge-test-layout">
       <section class="knowledge-test-setup">
         <form id="knowledgeTestSetupForm" class="knowledge-test-form">
@@ -4104,10 +4159,11 @@ function renderStudentKnowledgeTestTab() {
               <h3>${escapeHtml(question.topic || selectedSubject || "知识测试")}</h3>
               <strong>${currentIndex + 1}/${(test.questions || []).length}${answeredQuestionIds.has(question.id) ? " · 已答" : ""}</strong>
             </div>
-            <div class="practice-question-tags"><span>${escapeHtml(question.type || "开放题")}</span><span>图谱节点：${escapeHtml(currentQuestionNode?.label || question.topic || "待绑定")}</span></div>
+            <div class="practice-question-tags"><span>${escapeHtml(question.type || "开放题")}</span><span>版本：${escapeHtml(question.version || "v1")}</span><span>难度：${escapeHtml(question.difficulty || "中")}</span><span>知识点：${escapeHtml(question.knowledgePoint || question.topic || "待绑定")}</span></div>
             <p>${escapeHtml(question.prompt)}</p>
             <div class="knowledge-question-meta">
-              <span>${escapeHtml(question.sourceTitle || "课程资料")}</span>
+              <span>来源：${escapeHtml(question.source || question.sourceTitle || "课程资料")}</span>
+              ${(question.misconceptionTags || []).length ? `<span>错因：${escapeHtml(question.misconceptionTags.join("、"))}</span>` : ""}
               ${question.sourceChapter ? `<span>${escapeHtml(question.sourceChapter)}</span>` : ""}
               <span>${escapeHtml(question.rubric || "按资料依据、关键点和表达完整度评分")}</span>
             </div>
@@ -4123,6 +4179,7 @@ function renderStudentKnowledgeTestTab() {
                 <div class="mastery-meter"><span style="width:${clamp(Number(test.result.accuracy || 0), 0, 100)}%"></span></div>
                 ${(test.result.matched || []).length ? `<p class="knowledge-test-detail">已覆盖：${escapeHtml((test.result.matched || []).slice(0, 8).join("、"))}</p>` : ""}
                 ${(test.result.missing || []).length ? `<p class="knowledge-test-detail">待补充：${escapeHtml((test.result.missing || []).slice(0, 8).join("、"))}</p>` : ""}
+                <p class="knowledge-test-detail"><strong>理解判定：</strong>${Number(test.result.accuracy || 0) >= 70 && (test.result.missing || []).length <= 2 ? "能解释关键依据，倾向于真正理解" : "暂不能仅凭分数确认理解，需完成不同题面变式验证"}</p>
                 <p class="practice-improvement-status">${phase === "verify" ? (test.result.errorEliminated ? "错因已消除：可以进入下一知识点。" : "错因尚未消除：建议更换干预方式，先看微课或询问 AI。") : "答题结果已写入学习画像，可查看错因并生成补救题。"}</p>
                 <div class="practice-answer-actions">
                   <button type="button" class="mini" data-test-action="analysis">查看错因分析</button>
@@ -4164,7 +4221,7 @@ function renderStudentKnowledgeTestTab() {
                 <article class="list-card">
                   <div>
                     <h3>${escapeHtml(item.topic || "知识点")}</h3>
-                    <p>第 ${Number(item.order || 0) || "-"} 题 · ${Number(item.accuracy || 0)}% · ${escapeHtml(item.masteryLevel || "")}</p>
+                  <p>第 ${Number(item.order || 0) || "-"} 题 · ${Number(item.accuracy || 0)}% · ${escapeHtml(item.masteryLevel || "")}</p><small>版本 ${escapeHtml(item.version || "v1")} · 难度 ${escapeHtml(item.difficulty || "中")} · 用时 ${item.durationMs ? `${Math.round(item.durationMs / 1000)} 秒` : "未记录"}</small><small>错因标签：${escapeHtml((item.misconceptionTags || []).join("、") || "待诊断")}</small>
                   </div>
                 </article>
               `).join("") || emptyBlock("提交答案后显示记录。")}
@@ -6450,6 +6507,7 @@ function bindGraphPage() {
         sourceNotice: payload.quiz.sourceNotice || "",
         sourceMaterials: payload.quiz.sourceMaterials || [],
         phase: payload.quiz.phase || form.get("phase") || "diagnostic",
+        startedAt: Date.now(),
         previousAccuracy: state.knowledgeTest?.phase === "diagnostic" ? Number(state.knowledgeTest?.summary?.accuracy || 0) : Number(state.knowledgeTest?.previousAccuracy || 0)
       };
       renderContent();
@@ -6477,7 +6535,9 @@ function bindGraphPage() {
           attempts: test.attempts || [],
           questionCount: (test.questions || []).length,
           phase: test.phase || question.phase || "diagnostic",
-          previousAccuracy: test.previousAccuracy || 0
+          previousAccuracy: test.previousAccuracy || 0,
+          durationMs: test.startedAt ? Math.max(0, Date.now() - test.startedAt) : 0,
+          version: question.version
         }
       });
       const attempt = {
@@ -6488,6 +6548,14 @@ function bindGraphPage() {
         accuracy: payload.result.accuracy,
         masteryLevel: payload.result.masteryLevel,
         feedback: payload.result.feedback,
+        version: question.version,
+        difficulty: question.difficulty,
+        misconceptionTags: question.misconceptionTags || [],
+        source: question.source || question.sourceTitle,
+        durationMs: test.startedAt ? Math.max(0, Date.now() - test.startedAt) : 0,
+        answerLength: answer.length,
+        matched: payload.result.matched || [],
+        missing: payload.result.missing || [],
         at: new Date().toISOString()
       };
       const attempts = [attempt, ...(test.attempts || [])].reduce((items, item) => {
@@ -6522,6 +6590,7 @@ function bindGraphPage() {
           sourceNotice: verifyPayload.quiz.sourceNotice || "",
           sourceMaterials: verifyPayload.quiz.sourceMaterials || [],
           previousAccuracy: Number(test.previousAccuracy || test.summary?.accuracy || 0)
+          ,startedAt: Date.now()
         };
         renderContent();
         showToast("补救完成，已自动生成验证性小测");
@@ -6545,7 +6614,8 @@ function bindGraphPage() {
       ...test,
       currentIndex: (Number(test.currentIndex || 0) + 1) % total,
       answer: "",
-      result: null
+      result: null,
+      startedAt: Date.now()
     };
     renderContent();
   });
@@ -7158,6 +7228,9 @@ function renderAiDepthTabs() {
 }
 
 function aiTaskOptions(isTeacher = isTeacherLike()) {
+  if (!isTeacher && state.page === "partner") {
+    return STUDENT_AI_TASK_MODES.filter((item) => item.key !== "diagnosis");
+  }
   return isTeacher
     ? [
       { key: "lesson_plan", label: "备课", hint: "教案、讲义和课堂目标", mode: "plan" },
@@ -8319,39 +8392,69 @@ function renderStudentAiPathRail(active) {
   `;
 }
 
+function aiConversationsForPage(conversations, isPartner = false) {
+  if (!isPartner) return conversations;
+  return conversations.filter((conv) => !["grade", "diagnosis"].includes(String(conv.mode || "").toLowerCase()));
+}
+
+function renderStudentLearningPath(active) {
+  const portfolio = currentStudentPortfolio();
+  const cycle = portfolio.learningCycle || {};
+  const stage = cycle.currentStage || {};
+  const focus = activeStudentAiTask();
+  const progress = Math.max(0, Math.min(100, Number(stage.progress || 0)));
+  const steps = [
+    { key: "diagnosis", label: "今日诊断", hint: "先作答，找出薄弱点", icon: "◎", mode: "diagnosis" },
+    { key: "explain", label: "理解错因", hint: "看懂为什么会错", icon: "?", mode: "concept" },
+    { key: "practice", label: "变式练习", hint: "完成 2 道巩固题", icon: "✓", mode: "review" },
+    { key: "review", label: "间隔复习", hint: "复习上次易错点", icon: "↻", mode: "plan" },
+    { key: "unlock", label: "解锁下一节", hint: "掌握后继续前进", icon: "★", mode: "plan" }
+  ];
+  const activeIndex = Math.min(steps.length - 1, Math.floor(progress / 25));
+  return `<section class="duo-learning-path" aria-label="今日学习路径">
+    <div class="duo-path-head"><div><span class="duo-eyebrow">TODAY'S PATH · ${escapeHtml(cycle.rangeText || "机器学习课程")}</span><h3>今天学什么？跟着路径一步步完成</h3><p>连续完成小任务，系统会根据答题结果自动调整下一步。</p></div><div class="duo-streak"><strong>🔥 ${Number(portfolio.evidenceCounts?.streakDays || 1)}</strong><span>天连续学习</span></div></div>
+    <div class="duo-path-track">${steps.map((step, index) => `<button type="button" class="duo-path-step ${index < activeIndex ? "done" : ""} ${index === activeIndex ? "active" : "locked"}" data-ai-draft="${step.mode}" title="${escapeHtml(step.hint)}"><span class="duo-step-icon">${step.icon}</span><span class="duo-step-label">${escapeHtml(step.label)}</span><small>${escapeHtml(step.hint)}</small></button>${index < steps.length - 1 ? `<i class="duo-path-line ${index < activeIndex ? "done" : ""}"></i>` : ""}`).join("")}</div>
+    <div class="duo-path-footer"><span><b>${Math.round(progress)}%</b> 本轮完成度 · 当前任务：${escapeHtml(focus.label || "学习任务")}</span><button type="button" class="mini primary" data-ai-draft="${escapeHtml(focus.key || "diagnosis")}">继续今日任务</button></div>
+  </section>`;
+}
+
 function renderAiPage() {
   const isTeacher = isTeacherLike();
-  const conversations = state.data.conversations || [];
+  const isPartner = state.page === "partner" && !isTeacher;
+  const conversations = aiConversationsForPage(state.data.conversations || [], isPartner);
   const active = conversations.find((conv) => conv.id === state.activeConversationId) || conversations[0];
+  if (isPartner && state.activeConversationId && !active) state.activeConversationId = null;
   if (active && !state.activeConversationId) {
     state.activeConversationId = active.id;
     state.aiMode = normalizeAiModeClient(active.mode || state.aiMode);
     state.aiTaskKey = state.aiMode;
     if (isTeacher) state.aiTeacherTask = state.aiTeacherTask || "lesson_plan";
   }
+  if (isPartner && !["concept", "derivation", "code", "review"].includes(state.aiTaskKey)) {
+    state.aiTaskKey = "concept";
+    state.aiMode = "explain";
+  }
   const intro = isTeacher
     ? "输入教学目标、课堂问题、出题要求或批改需求，系统会通过 Dify 工作流结合项目资料回答。"
-    : "输入概念问题、练习要求、学习计划或你的解题答案，系统会通过 Dify 工作流结合课程资料回答。";
+    : isPartner
+    ? "选择一个学习任务，先写下自己的理解，再让 AI 陪你完成解释、练习和复习。"
+    : "输入你的解题答案，AI 将定位知识薄弱点并解释错误原因。";
   const studentTask = isTeacher ? null : activeStudentAiTask();
   return `
-    <div class="chat-layout ai-workbench ai-assistant-workbench ${isTeacher ? "teacher-ai-workbench" : "student-ai-workbench"}">
-      ${isTeacher ? "" : `
-        <details class="ai-context-disclosure">
-          <summary>学习上下文与路径</summary>
-          ${renderStudentAiPathRail(active)}
-        </details>
-      `}
+    <div class="chat-layout ai-workbench ai-assistant-workbench ${isTeacher ? "teacher-ai-workbench" : "student-ai-workbench"} ${isPartner ? "partner-ai-workbench" : "diagnosis-ai-workbench"}">
+      ${isPartner ? renderStudentLearningPath(active) : ""}
       <section class="panel chat-panel ai-chat-panel ${isTeacher ? "teacher-ai-main" : "student-ai-main"}">
         <div class="dify-ai-head">
           <div>
-            <h2>${isTeacher ? "教学 AI 助教" : "机器学习任务型 AI 学习伙伴"}</h2>
-            ${isTeacher ? "" : `<p>先作答，后诊断。AI 用于定位错因、补齐知识与安排下一步，不替学生完成学习。</p>`}
+            <h2>${isTeacher ? "教学 AI 助教" : isPartner ? "机器学习任务型 AI 学习伙伴" : "错因诊断助手"}</h2>
+            ${isTeacher ? "" : `<p>${isPartner ? "像教练一样完成每日学习任务：理解概念、练习变式题、复习易错点。" : "先作答，后诊断。AI 用于定位错因、补齐知识与安排下一步，不替学生完成学习。"}</p>`}
           </div>
           <button id="newConversationBtn" class="primary" type="button">新建对话</button>
         </div>
         <div class="message-stream" id="aiMessages">
           ${(active?.messages || []).map(renderAiMessage).join("") || `<div class="bubble assistant"><span>AI</span><p>${escapeHtml(intro)}</p></div>`}
         </div>
+        ${isPartner ? renderAiTaskButtons(false) : ""}
         <form id="aiForm" class="composer rich-composer ai-composer dify-composer">
           ${isTeacher ? "" : `<label class="student-answer-field"><span>${escapeHtml(studentTask.answerLabel)}</span><textarea name="studentAnswer" rows="3" placeholder="${escapeHtml(studentTask.answerPlaceholder)}">${escapeHtml(state.aiStudentAnswer || "")}</textarea></label>`}
           <textarea name="prompt" rows="${isTeacher ? "3" : "2"}" placeholder="${escapeHtml(isTeacher ? aiPromptPlaceholder(true) : studentTask.promptPlaceholder)}"></textarea>
@@ -8364,15 +8467,39 @@ function renderAiPage() {
           </details>
         `}
       </section>
-      ${isTeacher ? renderDifyWorkflowSummary(active) : ""}
+        ${isTeacher ? renderDifyWorkflowSummary(active) : ""}
     </div>
   `;
+}
+
+function renderStudentPartnerPage() {
+  if (state.user?.role !== "student") return renderAiPage();
+  const cycle = currentStudentPortfolio().learningCycle || {};
+  const progress = Math.max(0, Math.min(100, Number(cycle.currentStage?.progress || 0)));
+  const bookChapters = ["第1章 初探机器学习", "第2章 机器学习的数学基础", "第3章 K 近邻算法", "第4章 线性回归", "第5章 机器学习的基本思想", "第6章 逻辑斯谛回归", "第7章 双线性模型", "第8章 神经网络与多层感知机", "第9章 卷积神经网络", "第10章 循环神经网络", "第11章 支持向量机", "第12章 决策树", "第13章 集成学习与梯度提升决策树", "第14章 k 均值聚类", "第15章 主成分分析", "第16章 概率图模型", "第17章 EM 算法", "第18章 自编码器"];
+  const chapterIndex = Math.min(bookChapters.length - 1, Math.floor(progress / 100 * bookChapters.length));
+  const visibleChapters = bookChapters.slice(Math.max(0, chapterIndex - 2), Math.min(bookChapters.length, chapterIndex + 4));
+  const levels = visibleChapters.map((chapter, index) => {
+    const absolute = Math.max(0, chapterIndex - 2) + index;
+    return [String(absolute + 1).padStart(2, "0"), chapter, absolute === chapterIndex ? "当前章节：先用自己的话解释核心概念" : absolute < chapterIndex ? "已完成：保留本章学习证据" : "解锁后进入本章学习", absolute === chapterIndex ? "concept" : absolute < chapterIndex ? "review" : "plan", chapter];
+  });
+  const unlocked = Math.min(levels.length, Math.max(1, chapterIndex - Math.max(0, chapterIndex - 2) + 1));
+  return `<div class="partner-level-page"><section class="partner-level-hero"><span class="duo-eyebrow">MACHINE LEARNING · LEARNING PARTNER</span><h2>今天学什么？跟着教材章节一步步完成</h2><p>内容依据《动手学机器学习》18 章目录生成；每一关只做一件事，完成后自动解锁下一章。</p><div class="partner-book-source">课程依据：<strong>《动手学机器学习》</strong> · 当前章节：${escapeHtml(bookChapters[chapterIndex])}</div><div class="partner-progress"><i style="width:${progress}%"></i></div><span class="partner-progress-label">${Math.round(progress)}% 本轮完成 · 已解锁 ${unlocked}/${levels.length} 章</span></section><section class="partner-levels">${levels.map((level, index) => { const absolute = Math.max(0, chapterIndex - 2) + index; const done = absolute < chapterIndex; const active = absolute === chapterIndex; return `<button type="button" class="partner-level ${done ? "done" : active ? "active" : "locked"}" data-ai-draft="${level[3]}" data-ai-chapter="${escapeHtml(level[4])}" ${!done && !active ? "disabled" : ""}><span class="level-number">${done ? "✓" : level[0]}</span><span><strong>${escapeHtml(level[1])}</strong><small>${escapeHtml(level[2])}</small></span>${active ? `<em>开始</em>` : done ? `<em>已完成</em>` : `<em>🔒</em>`}</button>`; }).join("")}</section><p class="partner-level-tip">每次 AI 讲解、练习和复盘都会标注对应章节；完成当前章节后，系统再解锁下一章。</p></div>`;
 }
 
 function bindAiPage() {
   bindDashboardPageLinks();
   bindReflectionForms();
   bindKnowledgeCorrectionForms();
+  document.querySelectorAll(".partner-level:not([disabled])").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.page = "ai";
+      state.aiTaskKey = button.dataset.aiDraft || "concept";
+      state.aiChapter = button.dataset.aiChapter || "";
+      state.aiMode = state.aiTaskKey === "review" ? "plan" : "explain";
+      renderShell();
+    });
+  });
   bindAiReviewForms();
   document.getElementById("toggleAiContext")?.addEventListener("click", () => {
     state.aiContextEditorOpen = !state.aiContextEditorOpen;

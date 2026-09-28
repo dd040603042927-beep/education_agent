@@ -118,18 +118,12 @@ http://127.0.0.1:5107
 将 `.env` 中设置为：
 
 ```text
-HOST=0.0.0.0
+HOST=127.0.0.1
 PORT=5107
 COOKIE_SECURE=false
 ```
 
 然后在 Windows 防火墙中放行 `5107` 端口。
-
-### Docker 演示
-
-```bash
-docker compose up -d --build
-```
 
 ## 发布前检查
 

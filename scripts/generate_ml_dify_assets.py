@@ -1032,15 +1032,10 @@ def llm_node_data(desc: str, system_text: str, user_text: str, context_selector=
 def workflow_yaml() -> dict:
     start_vars = [
         {"label": "机器学习问题", "max_length": 1200, "options": [], "required": True, "type": "paragraph", "variable": "question"},
-        {"label": "学生自我理解", "max_length": 2500, "options": [], "required": False, "type": "paragraph", "variable": "student_answer"},
-        {"label": "学习目标", "max_length": 48, "options": ["入门理解", "考试复习", "代码实践", "原理推导"], "required": True, "type": "select", "variable": "target_level"},
-        {"label": "诊断深度", "max_length": 48, "options": ["简洁", "标准", "深度"], "required": True, "type": "select", "variable": "diagnosis_depth"},
-        {"label": "学生ID（可选）", "max_length": 80, "options": [], "required": False, "type": "text-input", "variable": "student_id"},
-        {"label": "班级ID（可选）", "max_length": 80, "options": [], "required": False, "type": "text-input", "variable": "class_id"},
     ]
 
     nodes = [
-        node("start", "开始", "start", 80, 280, {"desc": "输入机器学习问题、学生自我理解、学习目标、诊断深度和可选项目回流 ID。", "variables": start_vars}, 248),
+        node("start", "开始", "start", 80, 280, {"desc": "请输入要解答的机器学习问题。", "variables": start_vars}, 248),
         node(
             "input_cleaning",
             "输入清洗与任务识别_代码节点",
@@ -1054,11 +1049,6 @@ def workflow_yaml() -> dict:
                 "outputs": code_outputs("question_clean", "student_answer_clean", "target_level_norm", "diagnosis_depth_norm", "diagnosis_mode", "has_student_answer", "candidate_keywords", "rag_query", "misconception_query", "student_id_clean", "class_id_clean"),
                 "variables": [
                     {"value_selector": ["start", "question"], "variable": "question"},
-                    {"value_selector": ["start", "student_answer"], "variable": "student_answer"},
-                    {"value_selector": ["start", "target_level"], "variable": "target_level"},
-                    {"value_selector": ["start", "diagnosis_depth"], "variable": "diagnosis_depth"},
-                    {"value_selector": ["start", "student_id"], "variable": "student_id"},
-                    {"value_selector": ["start", "class_id"], "variable": "class_id"},
                 ],
             },
             92,

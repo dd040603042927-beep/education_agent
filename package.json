@@ -2,7 +2,7 @@
   "name": "education-agent-platform",
   "version": "1.0.0",
   "private": true,
-  "description": "智慧教育智能体平台前后端原型",
+  "description": "知学伴：面向机器学习课程的学习诊断与个性化干预智能体",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -11,7 +11,8 @@
     "readiness": "node scripts/competition_readiness.js",
     "backup": "node scripts/backup_data.js",
     "migrate:sqlite": "node scripts/migrate_json_to_sqlite.js",
-    "aggregate:mastery": "node scripts/aggregate_student_mastery.js"
+    "aggregate:mastery": "node scripts/aggregate_student_mastery.js",
+    "import:ml-book": "node scripts/import_ml_book_question_bank.js"
   },
   "engines": {
     "node": ">=20"

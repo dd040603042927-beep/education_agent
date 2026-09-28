@@ -10,10 +10,10 @@
 Copy-Item .env.example .env
 ```
 
-修改 `.env`，至少设置强随机 `SESSION_SECRET`。局域网测试时保持：
+修改 `.env`，至少设置强随机 `SESSION_SECRET`。本机运行时保持：
 
 ```text
-HOST=0.0.0.0
+HOST=127.0.0.1
 PORT=5107
 DATA_DIR=./data
 LOG_DIR=./logs
@@ -35,39 +35,9 @@ node server.js
 http://127.0.0.1:5107
 ```
 
-局域网其他设备访问：
+## 2. OCR 说明
 
-```text
-http://你的电脑局域网IP:5107
-```
-
-需要在 Windows 防火墙中允许 `5107` 端口入站访问。不要直接暴露到公网；公网访问应放在 HTTPS 反向代理后，并设置 `COOKIE_SECURE=true`。
-
-## 2. Docker Compose 部署
-
-先准备 `.env`，再运行：
-
-```bash
-docker compose up -d --build
-```
-
-健康检查：
-
-```bash
-curl http://127.0.0.1:5107/api/healthz
-curl http://127.0.0.1:5107/api/readyz
-```
-
-Compose 会把数据和日志挂载到宿主机：
-
-```text
-./data -> /app/data
-./logs -> /app/logs
-```
-
-## 3. OCR 说明
-
-仓库中的 Dockerfile 是轻量 Node 运行镜像，不默认内置 PaddleOCR。它可以处理文本层 PDF、Office 文档和文本资料；扫描版 PDF 的完整 OCR 需要在运行环境中安装 Python、PyMuPDF、PaddleOCR 等依赖，或基于当前 Dockerfile 自行扩展镜像。
+本地运行可以处理文本层 PDF、Office 文档和文本资料；扫描版 PDF 的完整 OCR 需要安装 Python、PyMuPDF、PaddleOCR 等依赖。
 
 本机运行时可通过环境变量指定 Python：
 
@@ -83,7 +53,7 @@ PDF_AGENT_OCR_LEADING_PAGES=40
 PDF_AGENT_TIMEOUT_MS=1200000
 ```
 
-## 4. 发布前检查
+## 3. 发布前检查
 
 每次发布前至少执行：
 
@@ -95,7 +65,7 @@ npm.cmd test
 
 `npm test` 在部分 Windows PowerShell 环境会被执行策略拦截，可改用 `npm.cmd test`。
 
-## 5. 备份与恢复
+## 4. 备份与恢复
 
 当前版本仍使用 JSON 数据文件。小范围内测时必须定期备份：
 

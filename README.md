@@ -1,6 +1,16 @@
-﻿# 智慧教育智能体平台
+﻿# “知学伴”：机器学习课程学习诊断与个性化干预智能体
 
-本项目是一个不依赖外网安装的本地全栈原型，后端使用原生 Node.js，前端是静态 SPA。
+本项目是一个不依赖外网安装的本地全栈案例原型，后端使用原生 Node.js，前端是静态 SPA。
+
+## 案例定位
+
+知学伴面向某高校人工智能/计算机专业机器学习课程，聚焦一个可验证的学习闭环：
+
+1. 学生通过前测、问答和作业，定位自己薄弱的机器学习知识点；
+2. AI 结合知识图谱分析“为什么错”，给出可解释的错因和纠正建议；
+3. 系统按诊断结果生成个性化练习，教师在班级看板中掌握差异并进行分层干预。
+
+参赛展示建议以“诊断一名学生的逻辑回归/损失函数学习困难”为主线，模型实验、聊天等能力作为支撑资源，不作为并列卖点。
 
 ## 启动
 
@@ -39,16 +49,15 @@ node server.js
 
 ```env
 DIFY_BASE_URL=http://127.0.0.1:8080/v1
-DIFY_BASE_URL_CONTAINER=http://host.docker.internal:8080/v1
 DIFY_WORKFLOW_API_KEY=app-xxx
 DIFY_STUDENT_WORKFLOW_API_KEY=app-xxx
 DIFY_TEACHER_WORKFLOW_API_KEY=app-xxx
 DIFY_TEACHER_WORKFLOW_NAME=teacher_teaching_assistant
 DIFY_WORKFLOW_USER_PREFIX=education-agent
 DIFY_WORKFLOW_TIMEOUT_MS=60000
-DIFY_PROJECT_BASE_URL=http://host.docker.internal:5107
-DIFY_GRAPH_CONTEXT_URL=http://host.docker.internal:5107/api/integrations/dify/graph-context
-DIFY_CALLBACK_URL=http://host.docker.internal:5107/api/integrations/dify/diagnosis-callback
+DIFY_PROJECT_BASE_URL=http://127.0.0.1:5107
+DIFY_GRAPH_CONTEXT_URL=http://127.0.0.1:5107/api/integrations/dify/graph-context
+DIFY_CALLBACK_URL=http://127.0.0.1:5107/api/integrations/dify/diagnosis-callback
 DIFY_CALLBACK_TOKEN=replace-me-with-long-random-token
 ```
 
@@ -60,15 +69,15 @@ DIFY_CALLBACK_TOKEN=replace-me-with-long-random-token
 
 工作流的项目资料输入来自教师端上传并发布的课程资料和知识图谱：后端会把当前用户可见、且匹配学科的课程资料、图谱节点和错因资料以 `project_rag_context`、`project_misconception_context`、`project_mastery_context` 传给工作流，并额外传入 `assistant_task`、`assistant_role_context`、`project_class_context`。学生端会引用对应学科教师上传并发布给学生可见的资料；教师端会按“备课、出题、批改、学情分析、课堂生成”任务传入班级、资料、图谱、作业和提交上下文。教师工作流默认使用 `sync_mode=teacher-api-return`，不会调用现有学生诊断回调写入学生学习画像；即使批改任务绑定了学生提交，也只返回 AI 建议，最终成绩仍需教师在作业模块确认。
 
-新版学生诊断工作流内置“项目知识图谱数据库_HTTP节点”，会用 `DIFY_GRAPH_CONTEXT_URL` 和 `DIFY_CALLBACK_TOKEN` 直接调用项目后端 `/api/integrations/dify/graph-context`，按 `request_user_id`、`graph_id`、`node_id`、`knowledge_point` 查询当前用户可见的知识图谱数据库。Dify 内部知识库可以继续作为补充。Dify 工作流中的“项目数据库同步_HTTP节点”URL 应使用学生端请求传入的 `callback_url`；Docker 默认值为：
+新版学生诊断工作流内置“项目知识图谱数据库_HTTP节点”，会用 `DIFY_GRAPH_CONTEXT_URL` 和 `DIFY_CALLBACK_TOKEN` 直接调用项目后端 `/api/integrations/dify/graph-context`，按 `request_user_id`、`graph_id`、`node_id`、`knowledge_point` 查询当前用户可见的知识图谱数据库。Dify 内部知识库可以继续作为补充。Dify 工作流中的“项目数据库同步_HTTP节点”URL 应使用学生端请求传入的 `callback_url`；本地默认地址为 `http://127.0.0.1:5107`。
 
 ```text
-POST http://host.docker.internal:5107/api/integrations/dify/diagnosis-callback
+POST http://127.0.0.1:5107/api/integrations/dify/diagnosis-callback
 Authorization: Bearer <DIFY_CALLBACK_TOKEN>
 Body: {"callback_payload":"{{#json_output.callback_payload#}}"}
 ```
 
-如果 Dify 不是 Docker 部署，可把 `host.docker.internal` 改为项目后端实际可访问的地址。手动测试学生诊断工作流或教师端调用时未填写学生 ID，项目会返回 `skipped: true`，不会让工作流失败；学生从前端 AI 助教触发时会自动带上学生 ID 并同步学习画像、错题和会话记录。
+手动测试学生诊断工作流或教师端调用时未填写学生 ID，项目会返回 `skipped: true`，不会让工作流失败；学生从前端 AI 助教触发时会自动带上学生 ID 并同步学习画像、错题和会话记录。
 
 从前端 AI 助教触发的请求会传入 `sync_mode=api-return`：前端 `/api/ai/chat` 负责保存本轮问答会话，Dify HTTP 回调负责同步结构化诊断结果、掌握度、错题和运行记录，并跳过重复会话写入。
 
@@ -104,7 +113,6 @@ Body: {"callback_payload":"{{#json_output.callback_payload#}}"}
 - 课程资料 RAG 增强为关键词召回 + 本地语义指纹 + 重排，回答引用来源更稳定。
 - 作业批改增加 rubric 分项评分，AI 只生成建议分，教师确认后才成为正式成绩并更新学习画像。
 - 增加 `npm run backup`，可备份 `data/` 和 `logs/` 到 `backups/`。
-- 增加 Dockerfile、Docker Compose 和部署说明，便于局域网小范围内测。
 
 检查和烟测：
 
@@ -116,7 +124,7 @@ npm run backup
 
 `npm test` 会临时启动一个测试端口，验证健康检查、登录 cookie、会话恢复、越权阻断、恶意上传拦截、机器学习代码真实执行和 AI 对话结构。
 
-部署说明见 [DEPLOYMENT.md](./DEPLOYMENT.md)。小范围内测可以使用 `HOST=0.0.0.0` 暴露到局域网；公网访问必须放在 HTTPS 反向代理后。
+部署说明见 [DEPLOYMENT.md](./DEPLOYMENT.md)。当前默认绑定 `127.0.0.1`，仅供本机访问。
 
 ## 已实现模块
 
