@@ -5,6 +5,11 @@ const crypto = require("crypto");
 const zlib = require("zlib");
 const { spawn, execFileSync } = require("child_process");
 const { createStorage } = require("./storage");
+const { createEmbeddingProvider } = require("./storage/embeddingProvider");
+const { routeEducationalRequest } = require("./services/educationRouter");
+const { verifiedCitationsFromHits, verifyExternalCitations } = require("./services/citationVerifier");
+const { applyWeightedMasteryEvidence } = require("./services/mastery");
+const { RecoverableQueue } = require("./services/recoverableQueue");
 
 function loadEnvFile() {
   const envPath = path.join(__dirname, ".env");
@@ -36,7 +41,7 @@ const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 const RUNTIME_DIR = path.join(DATA_DIR, "runtime");
 const LOG_DIR = path.resolve(process.env.LOG_DIR || path.join(ROOT, "logs"));
 const DB_PATH = path.join(DATA_DIR, "db.json");
-const STORAGE_DRIVER = process.env.STORAGE_DRIVER || "json";
+const STORAGE_DRIVER = process.env.STORAGE_DRIVER || "sqlite";
 const DATABASE_URL = process.env.DATABASE_URL || process.env.SQLITE_PATH || "";
 const STORAGE_SCHEMA_PATH = path.join(ROOT, "storage", "schema.sql");
 const AUDIT_LOG_PATH = path.join(LOG_DIR, "audit.log");
@@ -50,6 +55,7 @@ const RAG_CHUNK_CHARS = 900;
 const RAG_CHUNK_OVERLAP = 160;
 const RAG_MAX_CONTEXT_CHUNKS = 5;
 const RAG_VECTOR_DIM = 64;
+const EMBEDDING_BATCH_SIZE = Math.max(1, Math.min(64, Number(process.env.EMBEDDING_BATCH_SIZE || 32)));
 const AI_UNLIMITED_EXTRACTOR = "ai-unlimited-pdf-graph-agent";
 const AI_AGENT_TIMEOUT_MS = Math.max(60 * 1000, Number(process.env.AI_PDF_AGENT_TIMEOUT_MS || 8 * 60 * 1000));
 const PDF_LIMITS = {
@@ -382,6 +388,13 @@ function createInitialDb() {
 }
 
 let dbStorage = null;
+let embeddingProvider = null;
+let backgroundQueue = null;
+
+function getEmbeddingProvider() {
+  if (!embeddingProvider) embeddingProvider = createEmbeddingProvider();
+  return embeddingProvider;
+}
 
 function getDbStorage() {
   if (!dbStorage) {
@@ -410,6 +423,31 @@ function writeDb(db) {
 
 function dbStorageMetadata() {
   return getDbStorage().metadata();
+}
+
+function getBackgroundQueue() {
+  if (!backgroundQueue) {
+    backgroundQueue = new RecoverableQueue({
+      storage: getDbStorage(),
+      handlers: {
+        ai_chat: async (job) => {
+          const db = readDb();
+          const actor = ensureUser(db, job.payload.actorId);
+          const result = await executeAiChat(db, actor, job.payload.body || {});
+          writeDb(db);
+          return result;
+        },
+        homework_multimodal: async (job) => {
+          const db = readDb();
+          const result = processHomeworkMultimodal(db, job.payload || {});
+          writeDb(db);
+          return result;
+        }
+      }
+    });
+    backgroundQueue.start();
+  }
+  return backgroundQueue;
 }
 
 function createLearningProfile(userId, role = "student") {
@@ -488,6 +526,59 @@ function cosineSimilarity(left = [], right = []) {
   let sum = 0;
   for (let index = 0; index < length; index += 1) sum += Number(left[index] || 0) * Number(right[index] || 0);
   return Math.max(-1, Math.min(1, sum));
+}
+
+function knowledgeChunkStorage() {
+  const storage = getDbStorage();
+  return typeof storage.readKnowledgeChunks === "function" ? storage : null;
+}
+
+async function embedQueryText(query) {
+  const text = String(query || "").trim();
+  if (!text) return null;
+  const provider = getEmbeddingProvider();
+  if (!provider.enabled) return null;
+  try {
+    const result = await provider.embedTexts([text]);
+    return result.embeddings?.[0] || null;
+  } catch (error) {
+    console.warn(`[embedding] query fallback: ${error.message}`);
+    return null;
+  }
+}
+
+async function indexCourseMaterialEmbeddings(db, materialIds = []) {
+  const storage = knowledgeChunkStorage();
+  const provider = getEmbeddingProvider();
+  if (!storage || !provider.enabled) return { provider: provider.provider, model: provider.model, indexed: 0, pending: 0 };
+  const selectedIds = new Set(materialIds.filter(Boolean));
+  const materialIdList = selectedIds.size ? Array.from(selectedIds) : (db.courseMaterials || []).map((material) => material.id);
+  const rows = storage.readKnowledgeChunks({ materialIds: materialIdList });
+  const pending = rows.filter((row) => row.embeddingProvider !== provider.provider || row.embeddingModel !== provider.model || !Array.isArray(row.embedding));
+  let indexed = 0;
+  for (let offset = 0; offset < pending.length; offset += EMBEDDING_BATCH_SIZE) {
+    const batch = pending.slice(offset, offset + EMBEDDING_BATCH_SIZE);
+    const result = await provider.embedTexts(batch.map((row) => row.content));
+    const updates = batch.map((row, index) => ({
+      id: row.id,
+      contentSha256: row.contentSha256,
+      embedding: result.embeddings[index],
+      provider: result.provider,
+      model: result.model
+    }));
+    storage.updateKnowledgeChunkEmbeddings(updates);
+    indexed += updates.length;
+  }
+  return { provider: provider.provider, model: provider.model, indexed, pending: rows.length - indexed };
+}
+
+async function tryIndexCourseMaterialEmbeddings(db, materialIds = []) {
+  try {
+    return await indexCourseMaterialEmbeddings(db, materialIds);
+  } catch (error) {
+    console.warn(`[embedding] indexing fallback: ${error.message}`);
+    return { provider: "legacy-hash", model: "legacy-64", indexed: 0, pending: materialIds.length, error: error.message };
+  }
 }
 
 function sourceChapterForText(text, fallback = "课程资料") {
@@ -3911,28 +4002,48 @@ function publicCourseMaterial(material) {
   };
 }
 
-function searchCourseKnowledge(db, userId, query, options = {}) {
+async function searchCourseKnowledge(db, userId, query, options = {}) {
   const subject = normalizeSubject(options.subject || "");
   const queryTokens = tokenizeForSearch(query);
   const queryTokenSet = new Set(queryTokens);
   const queryVector = embeddingFromTokens(queryTokens);
+  const semanticQueryVector = await embedQueryText(query);
   const queryText = String(query || "");
   const queryHead = queryText.replace(/\s+/g, "").slice(0, 16);
   const materialId = String(options.materialId || "").trim();
   const materials = visibleCourseMaterials(db, userId)
     .filter((material) => !materialId || material.id === materialId)
     .filter((material) => !subject || subject === "通用" || material.subject === subject || String(query).includes(material.subject));
+  if (getEmbeddingProvider().enabled) await tryIndexCourseMaterialEmbeddings(db, materials.map((material) => material.id));
+  const vectorStorage = knowledgeChunkStorage();
+  const vectorRows = vectorStorage?.readKnowledgeChunks({ materialIds: materials.map((material) => material.id) }) || [];
+  const vectorRowsById = new Map(vectorRows.map((row) => [row.id, row]));
+  const profile = (db.learningProfiles || []).find((item) => item.userId === userId);
+  const weakTopics = new Set([
+    ...Object.entries(profile?.mastery || {}).filter(([, item]) => Number(item?.score) < 0.58).map(([topic]) => topic),
+    ...(profile?.weakPoints || []),
+    ...(db.studentMastery || []).filter((item) => item.studentId === userId && Number(item.score) < 0.58).map((item) => item.knowledgePoint)
+  ].map((item) => normalizeKeywordText(item)).filter(Boolean));
   const materialHits = [];
   materials.forEach((material) => {
-    (material.chunks || []).forEach((chunk) => {
-      const chunkTokens = chunk.keywords?.length ? chunk.keywords : tokenizeForSearch(chunk.text);
+    const chunks = (material.chunks || []).map((chunk) => {
+      const row = vectorRowsById.get(chunk.id);
+      return row ? { ...chunk, ...row, text: row.content, keywords: row.metadata?.keywords || chunk.keywords || [] } : chunk;
+    });
+    chunks.forEach((chunk) => {
+      const chunkText = chunk.text || chunk.content || "";
+      const chunkTokens = chunk.keywords?.length ? chunk.keywords : tokenizeForSearch(chunkText);
       const overlap = chunkTokens.filter((token) => queryTokenSet.has(token));
-      const vectorScore = cosineSimilarity(queryVector, chunk.embedding || embeddingForText(chunk.text || ""));
-      const exactBoost = queryHead && String(chunk.text || "").replace(/\s+/g, "").includes(queryHead) ? 5 : 0;
+      const semanticVectorScore = semanticQueryVector && chunk.embeddingProvider === getEmbeddingProvider().provider && chunk.embeddingModel === getEmbeddingProvider().model
+        ? cosineSimilarity(semanticQueryVector, chunk.embedding || [])
+        : null;
+      const vectorScore = semanticVectorScore === null ? cosineSimilarity(queryVector, chunk.embedding || embeddingForText(chunkText)) : semanticVectorScore;
+      const exactBoost = queryHead && String(chunkText).replace(/\s+/g, "").includes(queryHead) ? 5 : 0;
       const subjectBoost = subject && subject !== "通用" && material.subject === subject ? 2 : 0;
       const titleBoost = chunkTokens.some((token) => String(material.title || "").includes(token)) ? 1 : 0;
       const chapterBoost = chunkTokens.some((token) => String(chunk.chapter || "").includes(token)) ? 1 : 0;
-      const score = Number((overlap.length * 2.2 + Math.max(0, vectorScore) * 12 + exactBoost + subjectBoost + titleBoost + chapterBoost).toFixed(3));
+      const masteryBoost = Array.from(weakTopics).some((topic) => normalizeKeywordText(`${chunk.chapter || ""} ${chunkText}`).includes(topic)) ? 1.8 : 0;
+      const score = Number((overlap.length * 1.8 + Math.max(0, vectorScore) * (semanticVectorScore === null ? 8 : 16) + exactBoost + subjectBoost + titleBoost + chapterBoost + masteryBoost).toFixed(3));
       if (score <= 0.5 && materialHits.length > 0) return;
       materialHits.push({
         type: "material",
@@ -3940,6 +4051,9 @@ function searchCourseKnowledge(db, userId, query, options = {}) {
         scoreDetail: {
           lexical: overlap.length,
           vector: Number(vectorScore.toFixed(3)),
+          embedding: semanticVectorScore !== null,
+          embeddingModel: semanticVectorScore !== null ? chunk.embeddingModel : "legacy-64",
+          mastery: masteryBoost,
           exact: exactBoost > 0
         },
         materialId: material.id,
@@ -3952,8 +4066,8 @@ function searchCourseKnowledge(db, userId, query, options = {}) {
         subject: material.subject,
         chapter: chunk.chapter || material.title,
         page: chunk.page || Math.max(1, (chunk.index || 0) + 1),
-        quote: String(chunk.text || "").slice(0, 220),
-        text: chunk.text
+        quote: String(chunkText).slice(0, 220),
+        text: chunkText
       });
     });
   });
@@ -4008,23 +4122,24 @@ function searchCourseKnowledge(db, userId, query, options = {}) {
 }
 
 function citationsFromHits(hits) {
-  return hits.map((hit, index) => ({
-    id: `S${index + 1}`,
-    type: hit.type,
-    title: hit.title,
-    sourceName: hit.sourceName,
-    subject: hit.subject,
-    chapter: hit.chapter,
-    page: hit.page,
-    quote: hit.quote,
-    materialId: hit.materialId,
-    ownerId: hit.ownerId,
-    global: Boolean(hit.global),
-    classId: hit.classId || "",
-    ragChannel: hit.ragChannel || "",
-    graphId: hit.graphId,
-    nodeId: hit.nodeId
-  }));
+  return verifiedCitationsFromHits(hits);
+}
+
+function publicBackgroundJob(job) {
+  if (!job) return null;
+  return {
+    id: job.id,
+    type: job.type,
+    status: job.status,
+    attempts: job.attempts,
+    maxAttempts: job.maxAttempts,
+    error: job.error,
+    result: job.status === "complete" ? job.result : null,
+    createdAt: job.createdAt,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt,
+    updatedAt: job.updatedAt
+  };
 }
 
 function knowledgeTestKeywords(text, limit = 16) {
@@ -4165,7 +4280,7 @@ function knowledgeTestMasteryLevel(accuracy) {
   return "精通";
 }
 
-function buildKnowledgeTestQuestions(db, userId, { subject = "", materialId = "", count = 4, phase = "diagnostic", nodeId = "" } = {}) {
+async function buildKnowledgeTestQuestions(db, userId, { subject = "", materialId = "", count = 4, phase = "diagnostic", nodeId = "" } = {}) {
   const user = ensureUser(db, userId);
   const requestedSubject = normalizeSubject(subject || user.subject || "");
   const requestedMaterialId = String(materialId || "").trim();
@@ -4219,12 +4334,12 @@ function buildKnowledgeTestQuestions(db, userId, { subject = "", materialId = ""
     ...materials.slice(0, 5).map((material) => `${material.title} ${material.sourceName}`),
     ...materials.slice(0, 3).flatMap((material) => (material.chunks || []).slice(0, 2).map((chunk) => chunk.text || ""))
   ].filter(Boolean).join("\n");
-  const searchedHits = searchCourseKnowledge(db, userId, query, {
+  const searchedHits = (await searchCourseKnowledge(db, userId, query, {
     subject: cleanSubject,
     materialId: fallbackUsed ? "" : requestedMaterialId,
     limit: 16,
     includeGraphs: false
-  }).filter((hit) => hit.type === "material" && isMeaningfulKnowledgeTestText(hit.text || hit.quote));
+  })).filter((hit) => hit.type === "material" && isMeaningfulKnowledgeTestText(hit.text || hit.quote));
   const fallbackHits = knowledgeTestMaterialHits(materials, 18);
   const hitMap = new Map();
   searchedHits.concat(fallbackHits).forEach((hit) => {
@@ -5322,6 +5437,11 @@ const ML_DIAGNOSIS_WORKFLOW_INFO = {
   version: "0.6.0",
   source: "dify/ml_learning_diagnosis/ml_learning_diagnosis_assistant_upgraded_0_6_0.yml"
 };
+const NATIVE_STUDENT_ASSISTANT_INFO = {
+  name: "学生画像驱动课程问答助手",
+  version: "1.0.0",
+  source: "server.js"
+};
 const ML_AI_WORKFLOW_CONTRACTS = {
   knowledge_qa: { label: "机器学习知识问答", input: ["问题", "当前知识点", "课程资料"], output: ["分层讲解", "引用资料", "关联节点"] },
   misconception_classification: { label: "错因分类", input: ["学生答案", "标准答案", "解题过程", "节点信息"], output: ["对错", "错因标签", "错误证据", "掌握度", "补救任务", "复测标记"] },
@@ -5728,13 +5848,13 @@ function updateTopicMastery(db, userId, topics, delta, evidence) {
   const profile = ensureLearningProfile(db, userId);
   topics.filter(Boolean).slice(0, 8).forEach((topic) => {
     const current = profile.mastery[topic] || { score: 0.52, status: "待诊断", evidence: [] };
-    const nextScore = Math.max(0.08, Math.min(0.98, Number(current.score || 0.52) + delta));
-    current.score = Number(nextScore.toFixed(2));
-    current.status = nextScore < 0.35 ? "未掌握" : nextScore < 0.58 ? "模糊" : nextScore < 0.78 ? "基本掌握" : "精通";
-    current.evidence = Array.isArray(current.evidence) ? current.evidence.slice(-8) : [];
-    current.evidence.push({ text: evidence, at: now() });
-    current.updatedAt = now();
-    profile.mastery[topic] = current;
+    profile.mastery[topic] = applyWeightedMasteryEvidence(current, {
+      score: Number(current.score || 0.52) + Number(delta || 0),
+      weight: 0.15,
+      source: "learning_activity",
+      text: evidence,
+      at: now()
+    });
   });
   const weakSet = new Set(profile.weakPoints || []);
   Object.entries(profile.mastery || {}).forEach(([topic, item]) => {
@@ -6208,19 +6328,19 @@ function buildMlDiagnosisQueries({ prompt, chapter = "", knowledgePoint = "", mo
   return { courseQuery, mistakeQuery };
 }
 
-function searchMlDiagnosisWorkflowKnowledge(db, userId, options = {}) {
+async function searchMlDiagnosisWorkflowKnowledge(db, userId, options = {}) {
   const limit = options.limit || RAG_MAX_CONTEXT_CHUNKS;
   const { courseQuery, mistakeQuery } = buildMlDiagnosisQueries(options);
   const searchLimit = Math.max(limit, 8);
   const selectedGraphHits = graphWorkflowHitsFromSelection(db, userId, options);
-  const courseHits = selectedGraphHits.concat(searchCourseKnowledge(db, userId, courseQuery, {
+  const courseHits = selectedGraphHits.concat((await searchCourseKnowledge(db, userId, courseQuery, {
     subject: options.subject,
     limit: searchLimit
-  }).map((hit) => ({ ...hit, ragChannel: "course" })));
-  const mistakeHits = searchCourseKnowledge(db, userId, mistakeQuery, {
+  })).map((hit) => ({ ...hit, ragChannel: "course" })));
+  const mistakeHits = (await searchCourseKnowledge(db, userId, mistakeQuery, {
     subject: options.subject,
     limit: searchLimit
-  }).map((hit) => ({ ...hit, ragChannel: "mistake" }));
+  })).map((hit) => ({ ...hit, ragChannel: "mistake" }));
   return {
     courseQuery,
     mistakeQuery,
@@ -6918,6 +7038,145 @@ function answerFromEvidence({ user, mode, prompt, hits, citations, profile, teac
     ].filter(Boolean).join("\n"),
     confidence: hasEvidence ? "high" : "low",
     topics
+  };
+}
+
+function studentProfileModelContext(profile = {}) {
+  const summary = profileMasterySummary(profile);
+  return {
+    level: profile.level || "未建档",
+    weak_topics: summary.weak.slice(0, 5).map((item) => ({ topic: item.topic, score: item.score, status: item.status })),
+    strong_topics: summary.strong.slice(0, 3).map((item) => ({ topic: item.topic, score: item.score, status: item.status })),
+    explicit_weak_points: (profile.weakPoints || []).slice(0, 5),
+    question_count: Number(profile.questionCount || 0),
+    practice_count: Number(profile.practiceCount || 0),
+    recent_activity: (profile.recentActivity || []).slice(0, 4).map((item) => ({
+      kind: item.kind || "",
+      mode: item.mode || "",
+      topics: (item.topics || []).slice(0, 3),
+      at: item.at || ""
+    }))
+  };
+}
+
+function openAiMessageText(data = {}) {
+  const content = data.choices?.[0]?.message?.content || data.output?.text || data.output_text || "";
+  if (Array.isArray(content)) {
+    return content.map((item) => typeof item === "string" ? item : (item?.text || item?.content || "")).join("\n").trim();
+  }
+  return String(content || "").trim();
+}
+
+async function callStudentModel({ user, mode, prompt, subject, chapter, knowledgePoint, answerDepth, studentAnswer, hits, citations, profile }) {
+  if (!isConfiguredSecret(OPENAI_API_KEY)) {
+    throw Object.assign(new Error("学生端直连模型未配置：请在 .env 设置有效的 OPENAI_API_KEY。"), { status: 503 });
+  }
+  const evidence = hits.slice(0, RAG_MAX_CONTEXT_CHUNKS).map((hit, index) => [
+    `[S${index + 1}] ${hit.title || hit.sourceName || "课程资料"}${hit.chapter ? ` / ${hit.chapter}` : ""}`,
+    String(hit.text || hit.quote || "").replace(/\s+/g, " ").slice(0, 750)
+  ].join("\n")).join("\n\n");
+  const profileContext = studentProfileModelContext(profile);
+  const requestId = uid("native_ai_req");
+  const messages = [
+    {
+      role: "system",
+      content: [
+        "你是机器学习课程的学生端问答助手。",
+        "回答必须优先依据给定的课程证据；证据不足时必须明确说明，并只给出一般性学习建议。",
+        "学生画像只能用于决定讲解深度、补充顺序和练习难度，不能把历史掌握度当作本轮答题结论，也不能透露无关个人信息。",
+        "学生没有提供自我理解时，mastery_score 必须为 null，mastery_level 必须为“未诊断”。",
+        "学生提供自我理解或处于批改模式时，才评估本轮回答并给出 0 到 100 的 mastery_score、错误标签和缺漏点；没有充分证据时应保守表达。",
+        "不要直接代做考试或作业；此类请求应改为提示解题思路和自检步骤。",
+        "只输出 JSON，不要 Markdown 围栏。字段：answer、topic_label、mastery_score、mastery_level、error_tags、missing_points、next_questions。",
+        "answer 用中文，依次包含“直接回答”“依据与例子”“易错提醒”“下一步自检问题”。"
+      ].join("\n")
+    },
+    {
+      role: "user",
+      content: [
+        `学科：${subject || "机器学习"}`,
+        `任务模式：${mode}`,
+        `回答深度：${answerDepthLabel(answerDepth)}`,
+        chapter ? `章节：${chapter}` : "",
+        knowledgePoint ? `指定知识点：${knowledgePoint}` : "",
+        `学生问题：${prompt}`,
+        studentAnswer ? `学生自我理解：${studentAnswer}` : "",
+        `学生画像摘要：${JSON.stringify(profileContext)}`,
+        `课程证据：\n${evidence || "未检索到可引用的课程证据。"}`
+      ].filter(Boolean).join("\n\n")
+    }
+  ];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        messages,
+        temperature: 0.2,
+        max_tokens: 1800
+      }),
+      signal: controller.signal
+    });
+    const raw = await response.text();
+    if (!response.ok) throw new Error(`模型接口返回 ${response.status}：${raw.slice(0, 240)}`);
+    const content = openAiMessageText(JSON.parse(raw));
+    const structured = extractJsonObject(content) || {};
+    const answer = String(structured.answer || structured.final_answer || content).trim();
+    if (!answer) throw new Error("模型没有返回学生端回答。");
+    const rawScore = structured.mastery_score;
+    const numericScore = rawScore === null || rawScore === undefined || rawScore === "" ? null : Number(rawScore);
+    const masteryScore = Number.isFinite(numericScore) && (studentAnswer || mode === "grade")
+      ? Math.max(0, Math.min(100, Math.round(numericScore)))
+      : null;
+    const list = (value) => Array.isArray(value) ? value.map((item) => String(item).trim()).filter(Boolean).slice(0, 8) : [];
+    const topic = String(structured.topic_label || knowledgePoint || inferQuestionTopics([prompt, chapter, ...hits.map((hit) => hit.text)].join("\n"), subject)[0] || "当前知识点").trim();
+    return {
+      content: answer,
+      confidence: hits.length ? "high" : "medium",
+      topics: Array.from(new Set([topic, ...inferQuestionTopics(`${prompt}\n${studentAnswer}`, subject)])).slice(0, 8),
+      workflowSource: "native-openai-compatible",
+      workflowResult: {
+        source: "native-openai-compatible",
+        request_id: requestId,
+        model: OPENAI_MODEL,
+        topic_label: topic,
+        mastery_score: masteryScore,
+        mastery_level: masteryScore === null ? "未诊断" : String(structured.mastery_level || "待复核"),
+        error_tags: list(structured.error_tags),
+        missing_points: list(structured.missing_points),
+        next_questions: list(structured.next_questions),
+        rag_evidence: citations.slice(0, RAG_MAX_CONTEXT_CHUNKS),
+        diagnosis_mode: studentAnswer || mode === "grade" ? "学习诊断模式" : "知识问答模式"
+      }
+    };
+  } catch (error) {
+    const detail = error?.name === "AbortError" ? `模型请求超时：${OPENAI_TIMEOUT_MS}ms。` : `学生端直连模型调用失败：${error.message || error}`;
+    throw Object.assign(new Error(detail), { status: error?.status || 502 });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function buildNativeStudentAnswerTrace({ retrieval = {}, citations = [], mode = "qa", topics = [], hasStudentAnswer = false }) {
+  return {
+    ...NATIVE_STUDENT_ASSISTANT_INFO,
+    mode,
+    retrievedCount: retrieval.hits?.length || 0,
+    citationCount: citations.length,
+    steps: [
+      "接收学生问题和当前学习任务",
+      `检索课程资料 ${retrieval.courseHits?.length || 0} 条、错因资料 ${retrieval.mistakeHits?.length || 0} 条`,
+      "读取学生掌握度、薄弱点和近期学习活动",
+      "将课程证据和学生画像传给后端直连模型",
+      hasStudentAnswer ? "解析本轮自我理解，生成诊断字段" : "生成分层讲解与自检问题，不更新本轮诊断分数",
+      `返回回答、引用和关联知识点：${topics.slice(0, 4).join("、") || "待定位"}`
+    ]
   };
 }
 
@@ -7735,7 +7994,7 @@ async function buildStudentDiagnosisAnswer(db, user, body) {
   const studentAnswer = String(body.studentAnswer || body.student_answer || "").trim();
   const hasStudentAnswer = Boolean(studentAnswer);
   const profile = ensureLearningProfile(db, user.id);
-  const retrieval = searchMlDiagnosisWorkflowKnowledge(db, user.id, {
+  const retrieval = await searchMlDiagnosisWorkflowKnowledge(db, user.id, {
     prompt,
     chapter,
     knowledgePoint,
@@ -7748,31 +8007,19 @@ async function buildStudentDiagnosisAnswer(db, user, body) {
   const retrievalQuery = retrieval.courseQuery;
   const hits = retrieval.hits;
   const citations = citationsFromHits(hits);
-  let agent;
-  try {
-    if (!isDifyStudentWorkflowConfigured()) {
-      throw new Error("学生 Dify 工作流未配置");
-    }
-    agent = await callStudentWorkflow({ db, user, body, mode, subject, chapter, knowledgePoint, answerDepth, studentAnswer, retrieval, profile });
-  } catch (error) {
-    const detail = String(error?.message || error || "");
-    const networkUnavailable = /ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|无法连接|fetch failed|未配置/i.test(detail);
-    if (!networkUnavailable) throw Object.assign(new Error(`学生 Dify 工作流调用失败：${detail}`), { status: 502 });
-    // Dify 未启动时保留可用的本地学习反馈，避免学生端被网络错误阻断。
-    const topic = knowledgePoint || retrieval.hits?.[0]?.topic || "当前机器学习知识点";
-    const fallbackText = mode === "grade"
-      ? `已记录你的作答。当前无法连接 AI 工作流，暂时不能完成自动错因分类。请先对照课程资料检查“${topic}”的定义、适用条件和计算步骤，稍后重试诊断。`
-      : mode === "plan"
-        ? `已为“${topic}”保留学习任务：先回看课程资料，再完成 2 道同类练习，最后用一道变式题验证。AI 工作流暂时离线，恢复后可获得更精细的个性化安排。`
-        : `关于“${topic}”的学习任务已创建。请先用自己的话写下理解，回看课程资料中的定义和例题，再完成一道练习。AI 工作流暂时离线，恢复后可继续获得分层讲解。`;
-    agent = {
-      content: fallbackText,
-      confidence: "local",
-      topics: [topic],
-      workflowSource: "local-fallback",
-      workflowResult: { workflow_type: mlWorkflowType(body.workflowType || body.workflow_type, mode), fallback: true, warning: "Dify 工作流暂时不可用，已切换为本地学习反馈。" }
-    };
-  }
+  const agent = await callStudentModel({
+    user,
+    mode,
+    prompt,
+    subject,
+    chapter,
+    knowledgePoint,
+    answerDepth,
+    studentAnswer,
+    hits,
+    citations,
+    profile
+  });
   const graphContext = findGraphContext(db, user.id, subject, retrievalQuery, agent.topics, hits);
   const workflowResult = agent.workflowResult || {};
   const topicLocalization = buildTopicLocalization({ prompt, knowledgePoint, graphContext, agent, workflowResult });
@@ -7806,7 +8053,8 @@ async function buildStudentDiagnosisAnswer(db, user, body) {
     mastery_update_skipped: topicLocalization.needsConfirmation
   };
   const workflowRequestId = String(workflowResult.request_id || workflowResult.requestId || "").trim();
-  const workflowScore = Number(workflowResult.mastery_score ?? workflowResult.masteryScore);
+  const rawWorkflowScore = workflowResult.mastery_score ?? workflowResult.masteryScore;
+  const workflowScore = rawWorkflowScore === null || rawWorkflowScore === undefined || rawWorkflowScore === "" ? NaN : Number(rawWorkflowScore);
   const workflowType = mlWorkflowType(body.workflowType || body.workflow_type, mode);
   const structuredDiagnosis = normalizeMisconceptionClassification(workflowResult, { knowledgePoint: topicLocalization.selectedTopic || topics[0] || knowledgePoint, nodeId: String(body.nodeId || body.node_id || graphContext.focusNode?.id || ""), masteryScore: workflowScore });
   Object.assign(enrichedWorkflowResult, workflowType === "misconception_classification" ? structuredDiagnosis : { workflow_type: workflowType });
@@ -7815,7 +8063,7 @@ async function buildStudentDiagnosisAnswer(db, user, body) {
     studentId: user.id,
     classId: String(body.classId || body.class_id || user.classIds?.[0] || ""),
     eventType: topicLocalization.needsConfirmation ? "ai_topic_pending" : (hasStudentAnswer || mode === "grade" ? "ai_diagnosis" : "ai_question"),
-    source: agent.workflowSource || "dify-api",
+    source: agent.workflowSource || "native-openai-compatible",
     subject,
     knowledgePoint: topicLocalization.selectedTopic || topics[0] || knowledgePoint,
     graphId: String(body.graphId || body.graph_id || graphContext.graphId || ""),
@@ -7835,9 +8083,9 @@ async function buildStudentDiagnosisAnswer(db, user, body) {
     },
     evidenceType: workflowType,
     evidenceSummary: workflowType === "misconception_classification" ? structuredDiagnosis.evidence : `AI ${workflowType}：${prompt.slice(0, 80)}`,
-    idempotencyKey: workflowRequestId ? `dify:${workflowRequestId}` : ""
+    idempotencyKey: workflowRequestId ? `ai:${workflowRequestId}` : ""
   });
-  if (workflowResult.mastery_score !== undefined || workflowResult.masteryScore !== undefined || workflowResult.mastery_level || workflowResult.masteryLevel) {
+  if (hasStudentAnswer && (Number.isFinite(workflowScore) || workflowResult.mastery_level || workflowResult.masteryLevel)) {
     recordDiagnosisResult(db, {
       studentId: user.id,
       eventId: learningEvent?.id || "",
@@ -7848,8 +8096,8 @@ async function buildStudentDiagnosisAnswer(db, user, body) {
       missingPoints: Array.isArray(workflowResult.missing_points) ? workflowResult.missing_points : [],
       evidence: Array.isArray(workflowResult.rag_evidence) ? workflowResult.rag_evidence : [],
       finalAnswer: agent.content || "",
-      modelOrWorkflow: agent.workflowSource || "dify-api",
-      idempotencyKey: workflowRequestId ? `dify-diagnosis:${workflowRequestId}` : ""
+      modelOrWorkflow: agent.workflowSource || "native-openai-compatible",
+      idempotencyKey: workflowRequestId ? `ai-diagnosis:${workflowRequestId}` : ""
     });
   }
   if (masteryTopics.length) {
@@ -7879,14 +8127,14 @@ async function buildStudentDiagnosisAnswer(db, user, body) {
     answerDepth
   });
   learningPanel.topicLocalization = topicLocalization;
-  const workflow = buildMlDiagnosisWorkflowTrace({ retrieval, citations, mode, topics, hasStudentAnswer });
+  const workflow = buildNativeStudentAnswerTrace({ retrieval, citations, mode, topics, hasStudentAnswer });
   return {
     ...agent,
     citations,
     mode,
     label: teaching.label,
     intent: teaching.intent,
-    strategy: "Dify 多 RAG 学习诊断工作流",
+    strategy: "后端直连模型的学生画像 RAG 问答",
     answerDepth,
     knowledgePoints: topics,
     graphContext,
@@ -7895,15 +8143,14 @@ async function buildStudentDiagnosisAnswer(db, user, body) {
     workflow,
     workflowResult: enrichedWorkflowResult,
     workflowContract: ML_AI_WORKFLOW_CONTRACTS[workflowType] || ML_AI_WORKFLOW_CONTRACTS.knowledge_qa,
-    retrieved: hits.map((hit) => ({ type: hit.type, title: hit.title, score: hit.score, subject: hit.subject, chapter: hit.chapter, ragChannel: hit.ragChannel || "" })),
+    retrieved: hits.map((hit) => ({ type: hit.type, title: hit.title, score: hit.score, subject: hit.subject, chapter: hit.chapter, scoreDetail: hit.scoreDetail, ragChannel: hit.ragChannel || "" })),
     tools: [
       "intent_router",
-      "student_dify_workflow_api",
-      "dify_input_cleaning",
+      "student_profile_context",
+      "openai_compatible_chat_completion",
       "course_rag_retrieval",
       "mistake_rag_retrieval",
       "evidence_merge",
-      "naive_bayes_topic_classifier",
       mode === "practice" ? "generate_quiz" : "",
       mode === "grade" ? "grade_answer" : "",
       mode === "plan" ? "create_study_plan" : "",
@@ -7924,7 +8171,7 @@ async function buildTeacherWorkflowAnswer(db, user, body) {
   const answerDepth = String(body.answerDepth || "layered");
   const profile = ensureLearningProfile(db, user.id);
   const selectedMaterialHits = selectedMaterialHitsForWorkflow(db, user.id, body.selectedMaterialIds || body.selected_material_ids || body.materialIds || body.materialId || body.material_id, subject, 8);
-  const retrieval = searchMlDiagnosisWorkflowKnowledge(db, user.id, {
+  const retrieval = await searchMlDiagnosisWorkflowKnowledge(db, user.id, {
     prompt,
     chapter,
     knowledgePoint,
@@ -7976,9 +8223,10 @@ async function buildTeacherWorkflowAnswer(db, user, body) {
       quote: citation.quote || citation.content || citation.text || ""
     }))
     : [];
+  const checkedOutputCitations = verifyExternalCitations(outputCitations, hits);
   return {
     ...agent,
-    citations: outputCitations.length ? outputCitations : citations,
+    citations: checkedOutputCitations.length ? checkedOutputCitations : citations,
     mode,
     label: taskMeta.label,
     intent: taskType,
@@ -7995,7 +8243,7 @@ async function buildTeacherWorkflowAnswer(db, user, body) {
       task_type: taskType,
       teacher_review_required: agent.workflowResult?.teacher_review_required !== false
     },
-    retrieved: hits.map((hit) => ({ type: hit.type, title: hit.title, score: hit.score, subject: hit.subject, chapter: hit.chapter, ragChannel: hit.ragChannel || "" })),
+    retrieved: hits.map((hit) => ({ type: hit.type, title: hit.title, score: hit.score, subject: hit.subject, chapter: hit.chapter, scoreDetail: hit.scoreDetail, ragChannel: hit.ragChannel || "" })),
     tools: [
       "teacher_task_router",
       "teacher_dify_workflow_api",
@@ -8013,8 +8261,99 @@ async function buildTeacherWorkflowAnswer(db, user, body) {
 }
 
 async function buildEducationalAgentAnswer(db, user, body) {
+  const route = routeEducationalRequest({
+    prompt: body.prompt,
+    requestedMode: body.mode,
+    role: user.role,
+    hasStudentAnswer: Boolean(body.studentAnswer || body.student_answer)
+  });
+  if (route.decision !== "allow") {
+    return {
+      content: route.message,
+      citations: [],
+      confidence: route.decision === "blocked" ? "blocked" : "low",
+      mode: "qa",
+      intent: route.intent || route.reason,
+      strategy: "教育意图与安全路由",
+      knowledgePoints: [],
+      graphContext: null,
+      learningPanel: { citations: [], nextPath: [], topicLocalization: { needsConfirmation: true } },
+      workflow: { mode: "route_only", decision: route.decision, reason: route.reason, steps: ["教育意图与安全路由已拦截或请求澄清"] },
+      workflowResult: { route },
+      actions: [],
+      retrieved: [],
+      tools: ["education_intent_safety_router"]
+    };
+  }
   if (user.role === "teacher" || user.role === "admin") return buildTeacherWorkflowAnswer(db, user, body);
   return buildStudentDiagnosisAnswer(db, user, body);
+}
+
+function assertActorOwnsUser(actor, userId) {
+  if (actor.role !== "admin" && actor.id !== String(userId || "")) {
+    throw Object.assign(new Error("不能代表其他账号发起此请求"), { status: 403 });
+  }
+}
+
+async function executeAiChat(db, actor, body) {
+  const user = ensureUser(db, body.userId);
+  let conv = body.conversationId ? db.conversations.find((item) => item.id === body.conversationId && item.userId === user.id) : null;
+  if (!conv) {
+    conv = { id: uid("conv"), userId: user.id, role: user.role, title: String(body.prompt).slice(0, 24) || "新的对话", mode: body.mode || "explain", messages: [], createdAt: now(), updatedAt: now() };
+    db.conversations.unshift(conv);
+  }
+  const userMessage = { id: uid("msg"), role: "user", content: String(body.prompt), createdAt: now() };
+  const agentAnswer = await buildEducationalAgentAnswer(db, user, body);
+  const assistantMessage = {
+    id: uid("msg"), role: "assistant", content: agentAnswer.content, citations: agentAnswer.citations,
+    confidence: agentAnswer.confidence, mode: agentAnswer.mode, intent: agentAnswer.intent, strategy: agentAnswer.strategy,
+    knowledgePoints: agentAnswer.knowledgePoints, graphContext: agentAnswer.graphContext, learningPanel: agentAnswer.learningPanel,
+    workflow: agentAnswer.workflow, workflowResult: agentAnswer.workflowResult, actions: agentAnswer.actions, retrieved: agentAnswer.retrieved, createdAt: now()
+  };
+  conv.mode = agentAnswer.mode || body.mode || conv.mode;
+  conv.messages.push(userMessage, assistantMessage);
+  conv.updatedAt = now();
+  if (conv.title === "新的对话") conv.title = String(body.prompt).slice(0, 24);
+  db.agentRuns = Array.isArray(db.agentRuns) ? db.agentRuns : [];
+  db.agentRuns.unshift({
+    id: uid("run"), userId: user.id, conversationId: conv.id, mode: conv.mode, prompt: String(body.prompt).slice(0, 240),
+    confidence: agentAnswer.confidence, citations: agentAnswer.citations, retrieved: agentAnswer.retrieved, intent: agentAnswer.intent,
+    strategy: agentAnswer.strategy, knowledgePoints: agentAnswer.knowledgePoints, graphFocus: agentAnswer.learningPanel?.graphFocus || null,
+    tools: agentAnswer.tools || [], workflow: agentAnswer.workflow, workflowResult: agentAnswer.workflowResult,
+    steps: agentAnswer.workflow?.steps || ML_DIAGNOSIS_WORKFLOW_STEP_TITLES, createdAt: now()
+  });
+  db.agentRuns = db.agentRuns.slice(0, 200);
+  recordAudit(db, actor, "ai.chat", { resourceType: "conversation", resourceId: conv.id, meta: { mode: conv.mode, confidence: agentAnswer.confidence } });
+  return { conversation: conv, messages: [userMessage, assistantMessage] };
+}
+
+function processHomeworkMultimodal(db, payload = {}) {
+  const submission = (db.submissions || []).find((item) => item.id === payload.submissionId);
+  if (!submission) throw Object.assign(new Error("作业提交不存在"), { status: 404 });
+  const attachments = Array.isArray(submission.attachments) ? submission.attachments : [];
+  const documents = attachments.slice(0, 12).map((attachment) => {
+    const type = String(attachment?.type || "").toLowerCase();
+    const name = String(attachment?.name || "附件");
+    if (type.startsWith("image/")) {
+      return { name, type, modality: "image", status: "vision_required", text: "", message: "图片作业已入队；配置视觉 OCR/多模态模型后可提取手写内容。" };
+    }
+    try {
+      const extracted = extractUploadedBookText(attachment);
+      return { name, type, modality: type.includes("pdf") ? "pdf" : "document", status: extracted.text ? "extracted" : "no_text", text: String(extracted.text || "").slice(0, 6000), meta: extracted.meta || null };
+    } catch (error) {
+      return { name, type, modality: "document", status: "failed", text: "", message: String(error.message || error).slice(0, 500) };
+    }
+  });
+  const extractedText = documents.filter((item) => item.status === "extracted").map((item) => item.text).join("\n\n").slice(0, 12000);
+  submission.multimodalUnderstanding = {
+    status: documents.some((item) => item.status === "vision_required") ? "partial" : "complete",
+    documents,
+    extractedText,
+    processedAt: now(),
+    pendingVisionCount: documents.filter((item) => item.status === "vision_required").length
+  };
+  submission.updatedAt = now();
+  return { submissionId: submission.id, understanding: submission.multimodalUnderstanding };
 }
 
 function learningAnalytics(db, userId) {
@@ -9946,14 +10285,17 @@ function masteryStatusFromScore(score) {
 
 function setTopicMasteryScore(db, userId, topic, score, evidence, status = "") {
   const profile = ensureLearningProfile(db, userId);
-  const normalized = Math.max(0.08, Math.min(0.98, Number(score || 0)));
   const current = profile.mastery[topic] || { score: 0.52, status: "待诊断", evidence: [] };
-  current.score = Number(normalized.toFixed(2));
-  current.status = status || masteryStatusFromScore(normalized);
-  current.evidence = Array.isArray(current.evidence) ? current.evidence.slice(-8) : [];
-  current.evidence.push({ text: evidence, at: now() });
-  current.updatedAt = now();
-  profile.mastery[topic] = current;
+  const next = applyWeightedMasteryEvidence(current, {
+    score: normalizeLearningScore(score),
+    weight: 0.55,
+    source: "structured_diagnosis",
+    text: evidence,
+    at: now()
+  });
+  if (status) next.status = status;
+  profile.mastery[topic] = next;
+  const normalized = next.score;
   const weakSet = new Set(profile.weakPoints || []);
   if (normalized < 0.58) weakSet.add(topic);
   else weakSet.delete(topic);
@@ -11064,6 +11406,8 @@ async function handleApi(req, res, pathname, searchParams) {
 
   if (method === "GET" && pathname === "/api/healthz") {
     const storage = dbStorageMetadata();
+    const vectorStorage = knowledgeChunkStorage();
+    const embedding = getEmbeddingProvider();
     return send(res, 200, {
       ok: true,
       status: "ok",
@@ -11071,7 +11415,13 @@ async function handleApi(req, res, pathname, searchParams) {
       time: now(),
       storage: storage.label,
       storageDriver: storage.driver,
-      storagePath: storage.path
+      storagePath: storage.path,
+      embedding: {
+        provider: embedding.provider,
+        model: embedding.model,
+        enabled: embedding.enabled,
+        chunks: vectorStorage?.knowledgeChunkStats?.() || null
+      }
     });
   }
 
@@ -11082,8 +11432,8 @@ async function handleApi(req, res, pathname, searchParams) {
       runtimeDirWritable: checkRuntimeDirWritable(),
       sessionSecretConfigured: SESSION_SECRET_CONFIGURED,
       cookieSecure: process.env.COOKIE_SECURE === "true",
+      studentModelConfigured: isConfiguredSecret(OPENAI_API_KEY),
       difyWorkflowConfigured: isDifyWorkflowConfigured(),
-      difyStudentWorkflowConfigured: isDifyStudentWorkflowConfigured(),
       difyTeacherWorkflowConfigured: isDifyTeacherWorkflowConfigured(),
       difyCallbackTokenConfigured: isDifyCallbackTokenConfigured(),
       storage: storage.label,
@@ -11092,18 +11442,21 @@ async function handleApi(req, res, pathname, searchParams) {
       uploadSessions: uploadSessions.size,
       graphJobs: graphJobs.size
     };
+    const embedding = getEmbeddingProvider();
+    checks.embeddingProviderConfigured = embedding.enabled;
     const warnings = [];
     if (!checks.sessionSecretConfigured) warnings.push("未配置强随机 SESSION_SECRET，仅适合本地开发");
-    if (!checks.difyStudentWorkflowConfigured) warnings.push("未配置有效 DIFY_STUDENT_WORKFLOW_API_KEY 或 DIFY_WORKFLOW_API_KEY，学生端 AI 助教会返回配置错误");
+    if (!checks.studentModelConfigured) warnings.push("未配置有效 OPENAI_API_KEY，学生端 AI 助教无法调用后端直连模型");
     if (!checks.difyTeacherWorkflowConfigured) warnings.push("未配置有效 DIFY_TEACHER_WORKFLOW_API_KEY，教师端教学 AI 助教会返回配置错误");
     if (!checks.difyCallbackTokenConfigured) warnings.push("未配置强随机 DIFY_CALLBACK_TOKEN，Dify 回调接口将拒绝默认令牌");
+    if (!checks.embeddingProviderConfigured) warnings.push("未配置真实 Embedding，课程检索将暂时使用兼容性哈希向量；配置 EMBEDDING_API_KEY 后重建索引");
     if (process.env.NODE_ENV === "production" && !checks.cookieSecure) warnings.push("生产环境建议启用 COOKIE_SECURE=true 并使用 HTTPS");
     const ready = checks.dataDirWritable
       && checks.runtimeDirWritable
       && (process.env.NODE_ENV !== "production" || (
         checks.sessionSecretConfigured
         && checks.cookieSecure
-        && checks.difyStudentWorkflowConfigured
+        && checks.studentModelConfigured
         && checks.difyTeacherWorkflowConfigured
         && checks.difyCallbackTokenConfigured
       ));
@@ -11448,7 +11801,7 @@ async function handleApi(req, res, pathname, searchParams) {
     const body = await readBody(req);
     requireRole(actor, ["student", "admin"]);
     const userId = actor.role === "admin" && body.userId ? String(body.userId) : actor.id;
-    const quiz = buildKnowledgeTestQuestions(db, userId, {
+    const quiz = await buildKnowledgeTestQuestions(db, userId, {
       subject: String(body.subject || ""),
       materialId: String(body.materialId || body.material_id || ""),
       count: Math.min(5, Math.max(3, Number(body.count || 4))),
@@ -11858,7 +12211,8 @@ async function handleApi(req, res, pathname, searchParams) {
     db.courseMaterials.unshift(material);
     recordAudit(db, actor, "material.create", { resourceType: "courseMaterial", resourceId: material.id, meta: { title: material.title, subject: material.subject } }, req);
     writeDb(db);
-    return send(res, 201, { ok: true, material: publicCourseMaterial(material) });
+    const embedding = await tryIndexCourseMaterialEmbeddings(db, [material.id]);
+    return send(res, 201, { ok: true, embedding, material: publicCourseMaterial(material) });
   }
 
   if (method === "POST" && pathname === "/api/materials/from-upload") {
@@ -11892,7 +12246,8 @@ async function handleApi(req, res, pathname, searchParams) {
       db.courseMaterials.unshift(material);
       recordAudit(db, actor, "material.create_from_upload", { resourceType: "courseMaterial", resourceId: material.id, meta: { title: material.title, subject: material.subject } }, req);
       writeDb(db);
-      return send(res, 201, { ok: true, material: publicCourseMaterial(material) });
+      const embedding = await tryIndexCourseMaterialEmbeddings(db, [material.id]);
+      return send(res, 201, { ok: true, embedding, material: publicCourseMaterial(material) });
     } finally {
       cleanupUploadSession(body.uploadId, true);
     }
@@ -11906,7 +12261,7 @@ async function handleApi(req, res, pathname, searchParams) {
     const visible = visibleCourseMaterials(db, user.id);
     const material = body.materialId ? visible.find((item) => item.id === body.materialId) : null;
     if (body.materialId && !material) return sendError(res, 404, "资料不存在或不可见");
-    let hits = searchCourseKnowledge(db, user.id, body.query, {
+    let hits = await searchCourseKnowledge(db, user.id, body.query, {
       subject: body.subject || material?.subject || "",
       limit: 12
     });
@@ -12054,9 +12409,28 @@ async function handleApi(req, res, pathname, searchParams) {
     return send(res, 200, { ok: true, profile, learningAnalytics: learningAnalytics(db, body.userId) });
   }
 
+  if (method === "POST" && pathname === "/api/ai/jobs") {
+    const body = await readBody(req);
+    assertRequired(body, ["userId", "prompt"]);
+    assertActorOwnsUser(actor, body.userId);
+    const job = getBackgroundQueue().enqueue("ai_chat", { actorId: actor.id, body }, { createdBy: actor.id, maxAttempts: 3 });
+    recordAudit(db, actor, "ai.chat_queued", { resourceType: "backgroundJob", resourceId: job.id, meta: { type: job.type } }, req);
+    writeDb(db);
+    return send(res, 202, { ok: true, job: publicBackgroundJob(job) });
+  }
+
+  params = routePattern(pathname, "/api/jobs/:id");
+  if (method === "GET" && params) {
+    const job = getBackgroundQueue().get(params.id);
+    if (!job) return notFound(res);
+    if (actor.role !== "admin" && job.createdBy !== actor.id) return sendError(res, 403, "无权查看该后台任务");
+    return send(res, 200, { ok: true, job: publicBackgroundJob(job) });
+  }
+
   if (method === "POST" && pathname === "/api/ai/chat") {
     const body = await readBody(req);
     assertRequired(body, ["userId", "prompt"]);
+    assertActorOwnsUser(actor, body.userId);
     const user = ensureUser(db, body.userId);
     let conv = body.conversationId ? db.conversations.find((item) => item.id === body.conversationId && item.userId === user.id) : null;
     if (!conv) {
@@ -12184,7 +12558,7 @@ async function handleApi(req, res, pathname, searchParams) {
     if (prompt.length > 1200) return sendError(res, 400, "算法需求不能超过 1200 字");
     const codeMode = String(body.codeMode || "teaching").slice(0, 40);
     const difficulty = String(body.difficulty || "standard").slice(0, 40);
-    const hits = searchCourseKnowledge(db, body.userId, prompt, { subject, limit: 5 });
+    const hits = await searchCourseKnowledge(db, body.userId, prompt, { subject, limit: 5 });
     const relevantHits = hits.filter((hit) => Number(hit.score || 0) >= 0.8);
     let rawGenerated = null;
     let openAiError = null;
@@ -12224,7 +12598,7 @@ async function handleApi(req, res, pathname, searchParams) {
     assertRequired(body, ["userId", "code"]);
     const subject = normalizeSubject(body.subject || "machine learning");
     const prompt = String(body.prompt || body.title || "repair and run machine learning lab code").slice(0, 1200);
-    const contextHits = body.autoRepair ? searchCourseKnowledge(db, body.userId, prompt, { subject, limit: 5 }).filter((hit) => Number(hit.score || 0) >= 0.8) : [];
+    const contextHits = body.autoRepair ? (await searchCourseKnowledge(db, body.userId, prompt, { subject, limit: 5 })).filter((hit) => Number(hit.score || 0) >= 0.8) : [];
     const result = body.autoRepair ? await runModelCodeWithAutoRepair({ code: body.code, prompt, subject, contextHits }) : await runModelCodeSnippet(body.code);
     const workflow = buildModelCodeWorkflow({ hits: contextHits, generated: { sourceType: "manual", repairAttempts: result.repairAttempts || 0, verifiedRun: result }, run: result, repairHistory: result.repairHistory || [] });
     recordAudit(db, actor, "model.code_run", {
@@ -12556,6 +12930,7 @@ async function handleApi(req, res, pathname, searchParams) {
     const body = await readBody(req);
     assertRequired(body, ["studentId"]);
     requireRole(actor, ["student", "admin"]);
+    assertActorOwnsUser(actor, body.studentId);
     const klass = db.classes.find((item) => item.id === params.id || item.inviteCode === params.id);
     if (!klass) return notFound(res);
     const student = ensureUser(db, body.studentId);
@@ -12762,6 +13137,7 @@ async function handleApi(req, res, pathname, searchParams) {
     const body = await readBody(req);
     assertRequired(body, ["studentId"]);
     requireRole(actor, ["student", "admin"]);
+    assertActorOwnsUser(actor, body.studentId);
     const homework = db.homework.find((item) => item.id === params.id);
     if (!homework) return notFound(res);
     const student = ensureUser(db, body.studentId);
@@ -12786,7 +13162,10 @@ async function handleApi(req, res, pathname, searchParams) {
     });
     recordAudit(db, actor, "homework.submit", { resourceType: "submission", resourceId: submission.id, meta: { homeworkId: homework.id } }, req);
     writeDb(db);
-    return send(res, 201, { ok: true, submission });
+    const multimodalJob = submission.attachments.length
+      ? getBackgroundQueue().enqueue("homework_multimodal", { submissionId: submission.id }, { createdBy: actor.id, maxAttempts: 2 })
+      : null;
+    return send(res, 201, { ok: true, submission, multimodalJob: publicBackgroundJob(multimodalJob) });
   }
 
   params = routePattern(pathname, "/api/submissions/:id/ai-grade");
@@ -12986,6 +13365,7 @@ function listenWithFallback(port, attemptsLeft = 20) {
     ensureDataDir();
     loadRuntimeState();
     readDb();
+    getBackgroundQueue();
     console.log(`智慧教育智能体平台已启动：http://${HOST}:${port}`);
   });
 }

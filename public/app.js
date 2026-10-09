@@ -95,6 +95,7 @@ const state = {
   materialRagQuestion: "",
   materialRagResult: null,
   profilePanel: null,
+  settingsEditOpen: false,
   chatTool: null,
   adminExport: null,
   graphViews: {},
@@ -248,16 +249,16 @@ function iconSvg(name, label = "") {
 
 const CASE_NAME = "知学伴";
 const CASE_TAGLINE = "面向机器学习课程的 AI 学习诊断与个性化干预智能体";
+const PROJECT_TITLE = "知学伴 - 智能学习诊断、知识图谱与个性化成长平台";
 
 const teacherMenus = [
-  { key: "ai", icon: "bot", label: "学情诊断助手", section: "核心闭环" },
-  { key: "homework", icon: "clipboard", label: "错题与练习", section: "核心闭环" },
-  { key: "graph", icon: "network", label: "知识点路径", section: "核心闭环" },
-  { key: "classes", icon: "users", label: "班级学情", section: "核心闭环" },
-  { key: "materials", icon: "files", label: "课程资料", section: "支撑资源" },
-  { key: "models", icon: "lab", label: "算法实验（扩展）", section: "支撑资源" },
-  { key: "chat", icon: "message", label: "师生消息（扩展）", section: "支撑资源" },
-  { key: "profile", icon: "user", label: "个人信息", section: "账户" }
+  { key: "ai", icon: "bot", label: "教学助手" },
+  { key: "classes", icon: "users", label: "班级学情" },
+  { key: "graph", icon: "network", label: "知识图谱" },
+  { key: "materials", icon: "files", label: "课程资料" },
+  { key: "models", icon: "lab", label: "算法实验室" },
+  { key: "chat", icon: "message", label: "站内信息" },
+  { key: "settings", icon: "admin", label: "设置" }
 ];
 
 const adminMenus = [
@@ -265,17 +266,14 @@ const adminMenus = [
 ];
 
 const studentMenus = [
-  { key: "home", icon: "home", label: "诊断驾驶舱", section: "核心闭环" },
-  { key: "ai", icon: "bot", label: "错因诊断助手", section: "核心闭环" },
-  { key: "partner", icon: "school", label: "机器学习学习伙伴", section: "核心闭环" },
-  { key: "graph", icon: "network", label: "知识图谱", section: "核心闭环" },
-  { key: "homework", icon: "clipboard", label: "个性化练习", section: "核心闭环" },
-  { key: "portfolio", icon: "files", label: "学习证据档案", section: "学习结果" },
-  { key: "showcase", icon: "clipboard", label: "学习周期申报", section: "学习结果" },
-  { key: "courses", icon: "school", label: "我的课程", section: "学习结果" },
-  { key: "models", icon: "lab", label: "算法实验（扩展）", section: "扩展功能" },
-  { key: "chat", icon: "message", label: "站内消息（扩展）", section: "扩展功能" },
-  { key: "profile", icon: "user", label: "个人信息", section: "账户" }
+  { key: "ai", icon: "bot", label: "学习助手" },
+  { key: "partner", icon: "school", label: "学习伙伴" },
+  { key: "graph", icon: "network", label: "知识图谱" },
+  { key: "homework", icon: "clipboard", label: "个性化练习" },
+  { key: "courses", icon: "files", label: "我的课程" },
+  { key: "models", icon: "lab", label: "算法实验室" },
+  { key: "chat", icon: "message", label: "站内信息" },
+  { key: "settings", icon: "admin", label: "设置" }
 ];
 
 const MODEL_LABS = {
@@ -958,7 +956,7 @@ function isTeacherLike() {
 
 function defaultPageForRole(role = state.user?.role) {
   if (role === "admin") return "admin";
-  return role === "student" ? "home" : "ai";
+  return "ai";
 }
 
 function allVisibleGraphs() {
@@ -1241,6 +1239,7 @@ function resetSessionSelectionState() {
   state.conversationContextMenu = null;
   state.graphUploadAbort = null;
   state.graphGenerationCanceled = false;
+  state.settingsEditOpen = false;
   state.selectedMessages.clear();
   state.searchResults = [];
   state.subjectDefaultsInitialized = false;
@@ -1331,27 +1330,41 @@ function renderConversationContextMenu() {
 }
 
 function renderNavSections(menus) {
-  const sections = [];
-  menus.forEach((item) => {
-    const section = item.section || "功能";
-    let group = sections.find((entry) => entry.name === section);
-    if (!group) {
-      group = { name: section, items: [] };
-      sections.push(group);
-    }
-    group.items.push(item);
-  });
-  return sections.map((group) => `
-    <div class="nav-section">
-      <div class="nav-section-title">${escapeHtml(group.name)}</div>
-      ${group.items.map((item) => `
-        <button class="nav-item ${state.page === item.key ? "active" : ""}" data-page="${item.key}">
-          <span>${iconSvg(item.icon, item.label)}</span>${escapeHtml(item.label)}
-        </button>
-        ${item.key === "ai" ? renderSidebarConversations() : ""}
-      `).join("")}
-    </div>
+  return menus.map((item) => `
+    <button class="nav-item ${state.page === item.key ? "active" : ""}" data-page="${item.key}">
+      <span>${iconSvg(item.icon, item.label)}</span>${escapeHtml(item.label)}
+    </button>
   `).join("");
+}
+
+function renderSidebarBasicInfo({ isAdmin, teacherSide, classes }) {
+  if (isAdmin) return "";
+  const title = teacherSide ? "教师基本信息" : "学生基本信息";
+  const rows = teacherSide
+    ? [
+      ["姓名", state.user.name],
+      ["工号", state.user.id],
+      ["身份", "教师"],
+      ["任教学科", state.user.subject || preferredSubject() || "未设置"]
+    ]
+    : [
+      ["姓名", state.user.name],
+      ["学号", state.user.id],
+      ["身份", "学生"],
+      ["所在班级", studentClassSummary(classes)]
+    ];
+  return `
+    <section class="side-basic-info" aria-label="${title}">
+      <div class="side-basic-heading">
+        <span>${iconSvg("user", title)}</span>
+        <strong>${title}</strong>
+      </div>
+      <dl>
+        ${rows.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd title="${escapeHtml(value)}">${escapeHtml(value)}</dd></div>`).join("")}
+      </dl>
+      <button class="mini side-basic-settings" type="button" data-page="settings">管理设置</button>
+    </section>
+  `;
 }
 
 function renderBottomNav(menus) {
@@ -1514,6 +1527,20 @@ function renderShell() {
   if (state.page === "history") state.page = "ai";
   app.innerHTML = `
     <div class="layout ${state.navOpen ? "drawer-open" : ""}">
+      <header class="project-header">
+        <div class="project-brand">
+          <span class="project-brand-mark">${iconSvg("school", CASE_NAME)}</span>
+          <div>
+            <strong>${CASE_NAME}</strong>
+            <span>智慧教育智能体平台</span>
+          </div>
+        </div>
+        <h1 class="project-header-title">${PROJECT_TITLE}</h1>
+        <div class="project-header-actions">
+          <span>${escapeHtml(state.user.name)} · ${roleName(state.user.role)}</span>
+          <button class="mini side-action-button" type="button" id="headerRefreshBtn" title="刷新数据">${iconSvg("refresh", "刷新")}</button>
+        </div>
+      </header>
       <header class="mobile-topbar">
         <div>
           <strong>${CASE_NAME}</strong>
@@ -1523,24 +1550,8 @@ function renderShell() {
       </header>
       <div class="drawer-backdrop" id="drawerBackdrop"></div>
       <aside class="sidebar">
-        <div class="side-brand">
-          <div class="brand-lockup">
-            <span class="brand-logo">${iconSvg("school")}</span>
-            <strong>${CASE_NAME}</strong>
-          </div>
-          <div class="side-identity">
-            <span>${escapeHtml(state.user.name)}（${roleName(state.user.role)}）</span>
-            <div class="side-id-row">
-              <small>ID：${state.user.id}</small>
-              <div class="side-actions">
-                <button class="mini side-action-button" type="button" id="refreshBtn" title="刷新数据">${iconSvg("refresh", "刷新")}</button>
-                ${isAdmin ? "" : `<button class="mini side-action-button" type="button" data-page="profile" title="个人信息">${iconSvg("user", "个人信息")}</button>`}
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="section-label">${isAdmin ? "管理员端" : teacherSide ? "教师端" : "学生端"}</div>
-        <nav class="nav">
+        ${renderSidebarBasicInfo({ isAdmin, teacherSide, classes })}
+        <nav class="nav" aria-label="${isAdmin ? "管理员" : teacherSide ? "教师" : "学生"}导航">
           ${renderNavSections(menus)}
         </nav>
         <button id="logoutBtn" class="ghost wide">退出登录</button>
@@ -1548,9 +1559,6 @@ function renderShell() {
       <main class="main">
         <section id="content" class="content"></section>
       </main>
-      <div class="floating-tools">
-        <button title="返回默认页" data-page="${defaultPageForRole()}">${iconSvg("home", "返回默认页")}</button>
-      </div>
       ${renderBottomNav(menus)}
       ${renderConversationContextMenu()}
     </div>
@@ -1566,6 +1574,8 @@ function renderShell() {
   document.querySelectorAll("[data-page]").forEach((button) => {
     button.addEventListener("click", async () => {
       state.page = button.dataset.page;
+      state.profilePanel = null;
+      state.settingsEditOpen = false;
       state.navOpen = false;
       state.selectedMessages.clear();
       await loadState();
@@ -1643,7 +1653,12 @@ function renderShell() {
       renderAuth();
     });
   });
-  document.getElementById("refreshBtn").addEventListener("click", async () => {
+  document.getElementById("refreshBtn")?.addEventListener("click", async () => {
+    await loadState();
+    renderShell();
+    showToast("数据已刷新");
+  });
+  document.getElementById("headerRefreshBtn")?.addEventListener("click", async () => {
     await loadState();
     renderShell();
     showToast("数据已刷新");
@@ -1656,7 +1671,7 @@ function renderContent() {
   if (state.page === "history") state.page = "ai";
   if (state.page === "home") state.page = defaultPageForRole();
   if (state.user?.role === "admin" && state.page !== "admin") state.page = "admin";
-  if (state.user?.role === "student" && state.page === "materials") state.page = "graph";
+  if (!menuForCurrentUser().some((item) => item.key === state.page)) state.page = defaultPageForRole();
   if (state.page !== "graph") state.graphMaximized = false;
   const main = document.querySelector(".main");
   main?.classList.toggle("ai-main", state.page === "ai");
@@ -1665,7 +1680,6 @@ function renderContent() {
   document.body?.classList.toggle("graph-page-maximized", state.page === "graph" && state.graphMaximized);
   const contentClasses = ["content"];
   if (state.page === "ai") contentClasses.push("ai-content");
-  if (state.page === "partner") contentClasses.push("ai-content", "partner-content");
   if (state.page === "graph") contentClasses.push("graph-content");
   if (state.page === "models") contentClasses.push("model-content");
   if (state.page === "models" && state.modelSubject === "机器学习") contentClasses.push("ml-model-content");
@@ -1673,52 +1687,44 @@ function renderContent() {
   if (state.page === "materials") contentClasses.push("materials-content");
   if (state.page === "courses") contentClasses.push("courses-content");
   if (state.page === "homework") contentClasses.push("homework-content");
-  if (state.page === "portfolio") contentClasses.push("portfolio-content");
-  if (state.page === "showcase") contentClasses.push("showcase-content");
   if (state.page === "chat") contentClasses.push("chat-content");
-  if (state.page === "profile") contentClasses.push("profile-content");
+  if (state.page === "settings") contentClasses.push("settings-content");
   if (state.page === "classes") contentClasses.push("class-content");
   if (state.page === "admin") contentClasses.push("admin-content");
   content.className = contentClasses.join(" ");
   const pageMap = {
-    home: renderHomePage,
     graph: renderGraphPage,
     ai: renderAiPage,
-    partner: renderStudentPartnerPage,
+    partner: () => "",
     materials: renderMaterialsPage,
     courses: renderStudentCoursesPage,
-    portfolio: renderStudentPortfolioPage,
-    showcase: renderCaseShowcasePage,
     models: renderModelPage,
     chat: renderChatPage,
     classes: renderClassPage,
     admin: renderAdminPage,
     homework: isTeacherLike() ? renderTeacherHomeworkPage : renderStudentHomeworkPage,
-    profile: renderProfilePage
+    settings: renderSettingsPage
   };
-  const renderer = pageMap[state.page] || renderGraphPage;
+  const renderer = pageMap[state.page] || renderAiPage;
   content.innerHTML = renderer();
   bindCurrentPage();
 }
 
 function bindCurrentPage() {
   const binders = {
-    home: bindHomePage,
     graph: bindGraphPage,
     ai: bindAiPage,
-    partner: bindAiPage,
+    partner: () => {},
     materials: bindMaterialsPage,
     courses: bindStudentCoursesPage,
-    portfolio: bindStudentPortfolioPage,
-    showcase: bindCaseShowcasePage,
     models: bindModelPage,
     chat: bindChatPage,
     classes: bindClassPage,
     admin: bindAdminPage,
     homework: isTeacherLike() ? bindTeacherHomeworkPage : bindStudentHomeworkPage,
-    profile: bindProfilePage
+    settings: bindSettingsPage
   };
-  (binders[state.page] || bindGraphPage)();
+  (binders[state.page] || bindAiPage)();
 }
 
 function renderDashboardStat(label, value, hint = "") {
@@ -3842,7 +3848,7 @@ function renderGraphDetailShell(graphs, selected, mode = "teacher") {
       ${mode === "teacher" ? renderTeacherMlGraphEditor(selected) : ""}
       ${mode === "teacher" ? renderGraphAtlasNav(selected) : ""}
       <div class="graph-atlas-main">
-        ${renderGraphAtlasFilterbar(selected, stats)}
+        ${mode === "student" ? renderStudentGraphToolbar(selected, stats) : renderGraphAtlasFilterbar(selected, stats)}
         <div class="graph-atlas-workbench">
           <aside class="graph-atlas-stat-stack">
             ${renderGraphAtlasStats(selected, mode, stats)}
@@ -7228,9 +7234,6 @@ function renderAiDepthTabs() {
 }
 
 function aiTaskOptions(isTeacher = isTeacherLike()) {
-  if (!isTeacher && state.page === "partner") {
-    return STUDENT_AI_TASK_MODES.filter((item) => item.key !== "diagnosis");
-  }
   return isTeacher
     ? [
       { key: "lesson_plan", label: "备课", hint: "教案、讲义和课堂目标", mode: "plan" },
@@ -8392,69 +8395,33 @@ function renderStudentAiPathRail(active) {
   `;
 }
 
-function aiConversationsForPage(conversations, isPartner = false) {
-  if (!isPartner) return conversations;
-  return conversations.filter((conv) => !["grade", "diagnosis"].includes(String(conv.mode || "").toLowerCase()));
-}
-
-function renderStudentLearningPath(active) {
-  const portfolio = currentStudentPortfolio();
-  const cycle = portfolio.learningCycle || {};
-  const stage = cycle.currentStage || {};
-  const focus = activeStudentAiTask();
-  const progress = Math.max(0, Math.min(100, Number(stage.progress || 0)));
-  const steps = [
-    { key: "diagnosis", label: "今日诊断", hint: "先作答，找出薄弱点", icon: "◎", mode: "diagnosis" },
-    { key: "explain", label: "理解错因", hint: "看懂为什么会错", icon: "?", mode: "concept" },
-    { key: "practice", label: "变式练习", hint: "完成 2 道巩固题", icon: "✓", mode: "review" },
-    { key: "review", label: "间隔复习", hint: "复习上次易错点", icon: "↻", mode: "plan" },
-    { key: "unlock", label: "解锁下一节", hint: "掌握后继续前进", icon: "★", mode: "plan" }
-  ];
-  const activeIndex = Math.min(steps.length - 1, Math.floor(progress / 25));
-  return `<section class="duo-learning-path" aria-label="今日学习路径">
-    <div class="duo-path-head"><div><span class="duo-eyebrow">TODAY'S PATH · ${escapeHtml(cycle.rangeText || "机器学习课程")}</span><h3>今天学什么？跟着路径一步步完成</h3><p>连续完成小任务，系统会根据答题结果自动调整下一步。</p></div><div class="duo-streak"><strong>🔥 ${Number(portfolio.evidenceCounts?.streakDays || 1)}</strong><span>天连续学习</span></div></div>
-    <div class="duo-path-track">${steps.map((step, index) => `<button type="button" class="duo-path-step ${index < activeIndex ? "done" : ""} ${index === activeIndex ? "active" : "locked"}" data-ai-draft="${step.mode}" title="${escapeHtml(step.hint)}"><span class="duo-step-icon">${step.icon}</span><span class="duo-step-label">${escapeHtml(step.label)}</span><small>${escapeHtml(step.hint)}</small></button>${index < steps.length - 1 ? `<i class="duo-path-line ${index < activeIndex ? "done" : ""}"></i>` : ""}`).join("")}</div>
-    <div class="duo-path-footer"><span><b>${Math.round(progress)}%</b> 本轮完成度 · 当前任务：${escapeHtml(focus.label || "学习任务")}</span><button type="button" class="mini primary" data-ai-draft="${escapeHtml(focus.key || "diagnosis")}">继续今日任务</button></div>
-  </section>`;
-}
-
 function renderAiPage() {
   const isTeacher = isTeacherLike();
-  const isPartner = state.page === "partner" && !isTeacher;
-  const conversations = aiConversationsForPage(state.data.conversations || [], isPartner);
+  const conversations = state.data.conversations || [];
   const active = conversations.find((conv) => conv.id === state.activeConversationId) || conversations[0];
-  if (isPartner && state.activeConversationId && !active) state.activeConversationId = null;
   if (active && !state.activeConversationId) {
     state.activeConversationId = active.id;
     state.aiMode = normalizeAiModeClient(active.mode || state.aiMode);
     state.aiTaskKey = state.aiMode;
     if (isTeacher) state.aiTeacherTask = state.aiTeacherTask || "lesson_plan";
   }
-  if (isPartner && !["concept", "derivation", "code", "review"].includes(state.aiTaskKey)) {
-    state.aiTaskKey = "concept";
-    state.aiMode = "explain";
-  }
   const intro = isTeacher
     ? "输入教学目标、课堂问题、出题要求或批改需求，系统会通过 Dify 工作流结合项目资料回答。"
-    : isPartner
-    ? "选择一个学习任务，先写下自己的理解，再让 AI 陪你完成解释、练习和复习。"
     : "输入你的解题答案，AI 将定位知识薄弱点并解释错误原因。";
   const studentTask = isTeacher ? null : activeStudentAiTask();
   return `
-    <div class="chat-layout ai-workbench ai-assistant-workbench ${isTeacher ? "teacher-ai-workbench" : "student-ai-workbench"} ${isPartner ? "partner-ai-workbench" : "diagnosis-ai-workbench"}">
-      ${isPartner ? renderStudentLearningPath(active) : ""}
+    <div class="chat-layout ai-workbench ai-assistant-workbench ${isTeacher ? "teacher-ai-workbench" : "student-ai-workbench"} diagnosis-ai-workbench">
       <section class="panel chat-panel ai-chat-panel ${isTeacher ? "teacher-ai-main" : "student-ai-main"}">
         <div class="dify-ai-head">
           <div>
-            <h2>${isTeacher ? "教学 AI 助教" : isPartner ? "机器学习任务型 AI 学习伙伴" : "错因诊断助手"}</h2>
-            ${isTeacher ? "" : `<p>${isPartner ? "像教练一样完成每日学习任务：理解概念、练习变式题、复习易错点。" : "先作答，后诊断。AI 用于定位错因、补齐知识与安排下一步，不替学生完成学习。"}</p>`}
+            <h2>${isTeacher ? "教学 AI 助教" : "错因诊断助手"}</h2>
+            ${isTeacher ? "" : `<p>先作答，后诊断。AI 用于定位错因、补齐知识与安排下一步，不替学生完成学习。</p>`}
           </div>
           <button id="newConversationBtn" class="primary" type="button">新建对话</button>
         </div>
         <div class="message-stream" id="aiMessages">
           ${(active?.messages || []).map(renderAiMessage).join("") || `<div class="bubble assistant"><span>AI</span><p>${escapeHtml(intro)}</p></div>`}
         </div>
-        ${isPartner ? renderAiTaskButtons(false) : ""}
         <form id="aiForm" class="composer rich-composer ai-composer dify-composer">
           ${isTeacher ? "" : `<label class="student-answer-field"><span>${escapeHtml(studentTask.answerLabel)}</span><textarea name="studentAnswer" rows="3" placeholder="${escapeHtml(studentTask.answerPlaceholder)}">${escapeHtml(state.aiStudentAnswer || "")}</textarea></label>`}
           <textarea name="prompt" rows="${isTeacher ? "3" : "2"}" placeholder="${escapeHtml(isTeacher ? aiPromptPlaceholder(true) : studentTask.promptPlaceholder)}"></textarea>
@@ -8472,34 +8439,10 @@ function renderAiPage() {
   `;
 }
 
-function renderStudentPartnerPage() {
-  if (state.user?.role !== "student") return renderAiPage();
-  const cycle = currentStudentPortfolio().learningCycle || {};
-  const progress = Math.max(0, Math.min(100, Number(cycle.currentStage?.progress || 0)));
-  const bookChapters = ["第1章 初探机器学习", "第2章 机器学习的数学基础", "第3章 K 近邻算法", "第4章 线性回归", "第5章 机器学习的基本思想", "第6章 逻辑斯谛回归", "第7章 双线性模型", "第8章 神经网络与多层感知机", "第9章 卷积神经网络", "第10章 循环神经网络", "第11章 支持向量机", "第12章 决策树", "第13章 集成学习与梯度提升决策树", "第14章 k 均值聚类", "第15章 主成分分析", "第16章 概率图模型", "第17章 EM 算法", "第18章 自编码器"];
-  const chapterIndex = Math.min(bookChapters.length - 1, Math.floor(progress / 100 * bookChapters.length));
-  const visibleChapters = bookChapters.slice(Math.max(0, chapterIndex - 2), Math.min(bookChapters.length, chapterIndex + 4));
-  const levels = visibleChapters.map((chapter, index) => {
-    const absolute = Math.max(0, chapterIndex - 2) + index;
-    return [String(absolute + 1).padStart(2, "0"), chapter, absolute === chapterIndex ? "当前章节：先用自己的话解释核心概念" : absolute < chapterIndex ? "已完成：保留本章学习证据" : "解锁后进入本章学习", absolute === chapterIndex ? "concept" : absolute < chapterIndex ? "review" : "plan", chapter];
-  });
-  const unlocked = Math.min(levels.length, Math.max(1, chapterIndex - Math.max(0, chapterIndex - 2) + 1));
-  return `<div class="partner-level-page"><section class="partner-level-hero"><span class="duo-eyebrow">MACHINE LEARNING · LEARNING PARTNER</span><h2>今天学什么？跟着教材章节一步步完成</h2><p>内容依据《动手学机器学习》18 章目录生成；每一关只做一件事，完成后自动解锁下一章。</p><div class="partner-book-source">课程依据：<strong>《动手学机器学习》</strong> · 当前章节：${escapeHtml(bookChapters[chapterIndex])}</div><div class="partner-progress"><i style="width:${progress}%"></i></div><span class="partner-progress-label">${Math.round(progress)}% 本轮完成 · 已解锁 ${unlocked}/${levels.length} 章</span></section><section class="partner-levels">${levels.map((level, index) => { const absolute = Math.max(0, chapterIndex - 2) + index; const done = absolute < chapterIndex; const active = absolute === chapterIndex; return `<button type="button" class="partner-level ${done ? "done" : active ? "active" : "locked"}" data-ai-draft="${level[3]}" data-ai-chapter="${escapeHtml(level[4])}" ${!done && !active ? "disabled" : ""}><span class="level-number">${done ? "✓" : level[0]}</span><span><strong>${escapeHtml(level[1])}</strong><small>${escapeHtml(level[2])}</small></span>${active ? `<em>开始</em>` : done ? `<em>已完成</em>` : `<em>🔒</em>`}</button>`; }).join("")}</section><p class="partner-level-tip">每次 AI 讲解、练习和复盘都会标注对应章节；完成当前章节后，系统再解锁下一章。</p></div>`;
-}
-
 function bindAiPage() {
   bindDashboardPageLinks();
   bindReflectionForms();
   bindKnowledgeCorrectionForms();
-  document.querySelectorAll(".partner-level:not([disabled])").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.page = "ai";
-      state.aiTaskKey = button.dataset.aiDraft || "concept";
-      state.aiChapter = button.dataset.aiChapter || "";
-      state.aiMode = state.aiTaskKey === "review" ? "plan" : "explain";
-      renderShell();
-    });
-  });
   bindAiReviewForms();
   document.getElementById("toggleAiContext")?.addEventListener("click", () => {
     state.aiContextEditorOpen = !state.aiContextEditorOpen;
@@ -8559,6 +8502,17 @@ function bindAiPage() {
       }
     });
   });
+  const waitForAiJob = async (jobId) => {
+    const deadline = Date.now() + 90000;
+    while (Date.now() < deadline) {
+      const payload = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
+      if (payload.job?.status === "complete") return payload.job.result;
+      if (payload.job?.status === "failed") throw new Error(payload.job.error || "AI 后台任务失败");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    throw new Error("AI 任务仍在处理中，请稍后刷新查看结果。");
+  };
+
   const submitPrompt = async (prompt, explicitMode = "") => {
     const cleanPrompt = String(prompt || "").trim();
     if (!cleanPrompt) return;
@@ -8611,7 +8565,7 @@ function bindAiPage() {
       studentSubmissionId: state.aiSubmissionId,
       outputFormat: "json"
     } : {};
-    const payload = await api("/api/ai/chat", {
+    const queued = await api("/api/ai/jobs", {
       method: "POST",
       body: {
         userId: state.user.id,
@@ -8628,6 +8582,7 @@ function bindAiPage() {
         ...teacherContext
       }
     });
+    const payload = await waitForAiJob(queued.job.id);
     state.activeConversationId = payload.conversation.id;
     state.aiStudentAnswer = "";
     await loadState();
@@ -12070,6 +12025,97 @@ function renderProfilePage() {
   `;
 }
 
+function renderSettingsPage() {
+  const role = roleName(state.user.role);
+  const isStudent = state.user.role === "student";
+  return `
+    <div class="settings-page-shell">
+      <section class="workbench-title">
+        <div>
+          <h2>设置</h2>
+          <p>管理账户资料与当前工作空间。</p>
+        </div>
+      </section>
+      <section class="settings-grid">
+        <article class="panel settings-card">
+          <div class="settings-card-icon">${iconSvg("user", "账户资料")}</div>
+          <div>
+            <h3>账户资料</h3>
+            <p>${escapeHtml(state.user.name)} · ${role} · ID ${escapeHtml(state.user.id)}</p>
+          </div>
+          <button class="mini" type="button" data-settings-profile>编辑资料</button>
+        </article>
+        <article class="panel settings-card">
+          <div class="settings-card-icon">${iconSvg("refresh", "数据同步")}</div>
+          <div>
+            <h3>数据同步</h3>
+            <p>刷新后将同步班级、课程、学习记录和消息状态。</p>
+          </div>
+          <button class="mini" type="button" data-settings-refresh>刷新数据</button>
+        </article>
+        <article class="panel settings-card settings-card-danger">
+          <div class="settings-card-icon">${iconSvg("admin", "账户安全")}</div>
+          <div>
+            <h3>账户安全</h3>
+            <p>退出当前设备上的登录状态。</p>
+          </div>
+          <button class="mini danger" type="button" data-settings-logout>退出登录</button>
+        </article>
+      </section>
+      ${state.settingsEditOpen ? `
+        <div class="modal-backdrop">
+          <section class="modal compact-modal">
+            <button class="modal-close" type="button" data-close-settings-edit>×</button>
+            <h2>编辑资料</h2>
+            <form id="settingsProfileForm" class="stack">
+              <label>${isStudent ? "学号" : "工号"}<input value="${escapeHtml(state.user.id)}" disabled /></label>
+              <label>身份<input value="${role}" disabled /></label>
+              <label>姓名<input name="name" value="${escapeHtml(state.user.name)}" /></label>
+              <label>${isStudent ? "班级" : "任教学科"}<input name="${isStudent ? "className" : "subject"}" value="${escapeHtml(isStudent ? (state.user.className || "") : (state.user.subject || ""))}" /></label>
+              <label>邮箱<input name="email" value="${escapeHtml(state.user.email || "")}" /></label>
+              <label>电话<input name="phone" value="${escapeHtml(state.user.phone || "")}" /></label>
+              <button class="primary" type="submit">保存资料</button>
+            </form>
+          </section>
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function renderStudentGraphToolbar(graph, stats) {
+  const filterButtons = [
+    { label: "我的路径", key: "all" },
+    { label: "当前薄弱", key: "weak" },
+    { label: "已掌握", key: "mastered" },
+    { label: "误区节点", key: "misconception" }
+  ];
+  const searchValue = escapeHtml(state.graphSearch || "");
+  return `
+    <section class="student-graph-toolbar" aria-label="知识图谱工具栏">
+      <div class="student-graph-toolbar-heading">
+        <div>
+          <span>知识图谱</span>
+          <strong title="${escapeHtml(graph.title || "知识图谱")}">${escapeHtml(compactText(graph.title || "知识图谱", 34))}</strong>
+        </div>
+        <span>当前显示 <b>${stats.visibleNodes}/${stats.totalNodes}</b> 个知识点</span>
+      </div>
+      <div class="student-graph-toolbar-controls">
+        <form id="graphSearchForm" class="student-graph-search">
+          ${iconSvg("search", "搜索知识点")}
+          <input name="query" value="${searchValue}" placeholder="搜索知识点" />
+        </form>
+        <div class="student-graph-filter-list">
+          ${filterButtons.map((item) => `<button type="button" class="${(state.graphNodeFilter || "all") === item.key ? "active" : ""}" data-graph-node-filter="${item.key}">${escapeHtml(item.label)}</button>`).join("")}
+        </div>
+        <button class="student-graph-layout-button" type="button" data-graph-layer="${state.graphLayer === "overview" ? "relation" : "overview"}" title="切换图谱布局">
+          ${iconSvg("refresh", "切换图谱布局")}
+        </button>
+      </div>
+    </section>
+  `;
+}
+
 function bindProfilePage() {
   bindDashboardPageLinks();
   document.querySelectorAll("[data-profile-panel]").forEach((button) => {
@@ -12135,6 +12181,42 @@ function bindProfilePage() {
         showToast(error.message, "error");
       }
     });
+  });
+}
+
+function bindSettingsPage() {
+  document.querySelector("[data-settings-profile]")?.addEventListener("click", () => {
+    state.settingsEditOpen = true;
+    renderContent();
+  });
+  document.querySelector("[data-close-settings-edit]")?.addEventListener("click", () => {
+    state.settingsEditOpen = false;
+    renderContent();
+  });
+  document.getElementById("settingsProfileForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const body = { name: form.get("name"), email: form.get("email"), phone: form.get("phone") };
+    if (state.user.role === "student") body.className = form.get("className");
+    else body.subject = form.get("subject");
+    try {
+      const payload = await api(`/api/users/${state.user.id}`, { method: "PUT", body });
+      state.user = payload.user;
+      state.settingsEditOpen = false;
+      await loadState();
+      renderShell();
+      showToast("资料已保存");
+    } catch (error) {
+      showToast(error.message, "error");
+    }
+  });
+  document.querySelector("[data-settings-refresh]")?.addEventListener("click", async () => {
+    await loadState();
+    renderShell();
+    showToast("数据已刷新");
+  });
+  document.querySelector("[data-settings-logout]")?.addEventListener("click", () => {
+    document.getElementById("logoutBtn")?.click();
   });
 }
 

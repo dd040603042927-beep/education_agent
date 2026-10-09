@@ -1,10 +1,8 @@
 /* Import a small, auditable ML question bank from the bundled textbook material. */
-const fs = require("fs");
-const path = require("path");
+const { openStorage } = require("./storage_cli");
 
-const root = path.resolve(__dirname, "..");
-const dbPath = path.join(root, "data", "db.json");
-const db = JSON.parse(fs.readFileSync(dbPath, "utf8"));
+const store = openStorage();
+const db = store.read();
 const book = (db.courseMaterials || []).find((m) => m.subject === "机器学习" && /动手学机器学习/.test(`${m.title} ${m.sourceName}`));
 if (!book) throw new Error("未找到《动手学机器学习》课程资料，请先导入 PDF");
 
@@ -37,5 +35,6 @@ const questions = specs.map(([id, topic, chapter, prompt, answer, keywords], i) 
 });
 db.mlKnowledgePoints = points;
 db.mlQuestionBank = questions;
-fs.writeFileSync(dbPath, JSON.stringify(db, null, 2) + "\n", "utf8");
+store.write(db);
+store.close?.();
 console.log(JSON.stringify({ ok: true, materialId: book.id, knowledgePoints: points.length, questions: questions.length }, null, 2));

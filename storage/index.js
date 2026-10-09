@@ -2,7 +2,7 @@ const path = require("path");
 const { createJsonStore } = require("./jsonStore");
 
 function normalizeDriver(value) {
-  return String(value || "json").trim().toLowerCase();
+  return String(value || "sqlite").trim().toLowerCase();
 }
 
 function createStorage(options) {

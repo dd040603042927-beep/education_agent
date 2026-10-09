@@ -56,7 +56,7 @@ function main() {
   }
   if (!env.DATA_DIR) addIssue(issues, "warn", "DATA_DIR 未显式设置，建议指向 ./data");
   if (!env.LOG_DIR) addIssue(issues, "warn", "LOG_DIR 未显式设置，建议指向 ./logs");
-  if (!env.STORAGE_DRIVER) addIssue(issues, "warn", "STORAGE_DRIVER 未显式设置，默认会继续使用 JSON");
+  if (!env.STORAGE_DRIVER) addIssue(issues, "warn", "STORAGE_DRIVER 未显式设置，默认使用 SQLite；已有 JSON 请先迁移");
   if (!env.OPENAI_API_KEY) addIssue(issues, "warn", "OPENAI_API_KEY 未设置，若依赖 OpenAI 回答需补充");
   if (!env.DIFY_STUDENT_WORKFLOW_API_KEY) addIssue(issues, "warn", "DIFY_STUDENT_WORKFLOW_API_KEY 未设置，学生端工作流无法联通");
   if (!env.DIFY_TEACHER_WORKFLOW_API_KEY) addIssue(issues, "warn", "DIFY_TEACHER_WORKFLOW_API_KEY 未设置，教师端工作流无法联通");
@@ -87,9 +87,12 @@ function main() {
     if (!ok) addIssue(issues, "error", `缺少关键目录：${dir}`);
   }
 
-  const dbPath = path.join(ROOT, "data", "db.json");
+  const dataDir = path.resolve(env.DATA_DIR || path.join(ROOT, "data"));
+  const databaseUrl = resolveEnv("DATABASE_URL") || resolveEnv("SQLITE_PATH");
+  const dbPath = env.STORAGE_DRIVER === "json" ? path.join(dataDir, "db.json")
+    : databaseUrl ? path.resolve(databaseUrl.replace(/^file:/, "")) : path.join(dataDir, "education.db");
   if (!fs.existsSync(dbPath)) {
-    addIssue(issues, "warn", "data/db.json 不存在，首次启动会自动生成，但演示前建议先跑一次服务");
+    addIssue(issues, "warn", `当前数据库不存在：${dbPath}；已有 JSON 请先迁移，否则先启动服务初始化`);
   }
 
   console.log("教育智能体竞赛部署体检");

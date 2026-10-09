@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS diagnosis_results (
   evidence_json TEXT NOT NULL DEFAULT '[]',
   final_answer TEXT NOT NULL DEFAULT '',
   model_or_workflow TEXT NOT NULL DEFAULT '',
+  idempotency_key TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   FOREIGN KEY(event_id) REFERENCES learning_events(id) ON DELETE SET NULL
 );
@@ -108,3 +109,46 @@ CREATE TABLE IF NOT EXISTS ingestion_jobs (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+
+CREATE TABLE IF NOT EXISTS knowledge_chunks (
+  id TEXT PRIMARY KEY,
+  material_id TEXT NOT NULL,
+  graph_id TEXT NOT NULL DEFAULT '',
+  chapter TEXT NOT NULL DEFAULT '',
+  page INTEGER,
+  content TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  embedding_json TEXT,
+  embedding_provider TEXT NOT NULL DEFAULT '',
+  embedding_model TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_material
+  ON knowledge_chunks(material_id);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_embedding
+  ON knowledge_chunks(embedding_provider, embedding_model);
+
+CREATE TABLE IF NOT EXISTS background_jobs (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  result_json TEXT,
+  error TEXT NOT NULL DEFAULT '',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 3,
+  run_after TEXT NOT NULL,
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  started_at TEXT NOT NULL DEFAULT '',
+  completed_at TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_background_jobs_ready
+  ON background_jobs(status, run_after, created_at);

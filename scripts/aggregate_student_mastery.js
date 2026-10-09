@@ -1,9 +1,4 @@
-const fs = require("fs");
-const path = require("path");
-
-const ROOT = path.join(__dirname, "..");
-const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT, "data"));
-const DB_PATH = path.resolve(process.env.JSON_DB_PATH || path.join(DATA_DIR, "db.json"));
+const { openStorage } = require("./storage_cli");
 
 const EVENT_WEIGHTS = {
   homework_grade_confirmed: 0.45,
@@ -133,12 +128,16 @@ function aggregate(db) {
 }
 
 function main() {
-  if (!fs.existsSync(DB_PATH)) throw new Error(`database not found: ${DB_PATH}`);
-  const db = JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
-  const snapshots = aggregate(db);
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), "utf8");
-  console.log(`student mastery snapshots: ${snapshots.length}`);
-  console.log(`database updated: ${DB_PATH}`);
+  const store = openStorage();
+  try {
+    const db = store.read();
+    const snapshots = aggregate(db);
+    store.write(db);
+    console.log(`student mastery snapshots: ${snapshots.length}`);
+    console.log(`database updated: ${store.metadata().path}`);
+  } finally {
+    store.close?.();
+  }
 }
 
 main();

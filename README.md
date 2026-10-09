@@ -14,6 +14,8 @@
 
 ## 启动
 
+需要 Node.js 22.13 或更新版本（使用内置 `node:sqlite`，推荐 Node.js 24）。默认存储为 SQLite；已有 JSON 数据时请先按 `docs/SQLITE_MIGRATION.md` 备份和迁移，不能直接切换配置或覆盖已有数据库。
+
 ```powershell
 node server.js
 ```
@@ -23,6 +25,19 @@ node server.js
 ```text
 http://127.0.0.1:5107
 ```
+
+## 当前架构
+
+```text
+SPA -> Node.js API Gateway -> 教育意图与安全路由 -> 混合检索
+    -> 后端直连模型 -> 引用校验与结构化输出 -> 学习事件/掌握度 -> SQLite
+                                      -> 可恢复后台任务队列
+```
+
+- `/api/ai/jobs` 是 AI 对话的可恢复队列入口；SPA 使用该入口并轮询 `/api/jobs/:id`。`/api/ai/chat` 保留为兼容同步接口。
+- 课程引用携带来源片段的 SHA-256 和精确引文校验状态；工作流返回但无法与本地来源匹配的引用会标为 `unverified`。
+- 掌握度不再直接覆盖，而是按结构化诊断和学习活动等证据权重更新。
+- 学生作业附件会创建 `homework_multimodal` 任务。PDF、Office 和文本附件会提取文本；图片附件需要配置视觉 OCR/多模态模型后才会输出识别文本，系统不会把未识别图片当作已理解内容。
 
 ## 竞赛部署
 
@@ -43,43 +58,20 @@ node server.js
 
 项目启动时会自动读取根目录 `.env`。建议复制 `.env.example` 为 `.env`，至少设置强随机 `SESSION_SECRET`。如果通过 HTTPS 反向代理公开访问，请设置 `COOKIE_SECURE=true`。
 
-## Dify 工作流对接
+## AI 模型对接
 
-项目 AI 助教保留统一入口 `/api/ai/chat`，但后端会按角色拆分工作流：学生端继续对接学习诊断工作流 `dify/ml_learning_diagnosis/ml_learning_diagnosis_assistant_upgraded_0_6_0.yml`，教师端对接独立的“教师教学工作流”。导入并发布对应 Dify App 后，在 Dify 的“访问 API”里创建 App API Key，并在项目 `.env` 中配置：
+学生端 AI 助教直接使用后端的 OpenAI 兼容 `/chat/completions` 接口。后端先检索当前学生可见的课程资料、错因资料和知识图谱，再将引用证据、学生掌握度、薄弱点和近期学习活动一并传给模型。模型只负责生成回答与结构化诊断，引用校验、学习事件和画像写入仍由项目后端完成。
 
 ```env
-DIFY_BASE_URL=http://127.0.0.1:8080/v1
-DIFY_WORKFLOW_API_KEY=app-xxx
-DIFY_STUDENT_WORKFLOW_API_KEY=app-xxx
-DIFY_TEACHER_WORKFLOW_API_KEY=app-xxx
-DIFY_TEACHER_WORKFLOW_NAME=teacher_teaching_assistant
-DIFY_WORKFLOW_USER_PREFIX=education-agent
-DIFY_WORKFLOW_TIMEOUT_MS=60000
-DIFY_PROJECT_BASE_URL=http://127.0.0.1:5107
-DIFY_GRAPH_CONTEXT_URL=http://127.0.0.1:5107/api/integrations/dify/graph-context
-DIFY_CALLBACK_URL=http://127.0.0.1:5107/api/integrations/dify/diagnosis-callback
-DIFY_CALLBACK_TOKEN=replace-me-with-long-random-token
+OPENAI_API_KEY=replace-with-your-openai-api-key
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4.1-mini
+OPENAI_TIMEOUT_MS=25000
 ```
 
-`DIFY_STUDENT_WORKFLOW_API_KEY` 是学生端学习诊断工作流 key；未配置时会兼容读取旧的 `DIFY_WORKFLOW_API_KEY`。`DIFY_TEACHER_WORKFLOW_API_KEY` 是教师端教学工作流 key，教师端不会再复用学生学习诊断工作流。任一角色的工作流未配置时，该角色 AI 助教会返回明确的配置错误，不再回落到本地答案。
+学生没有提交自我理解时，模型只生成分层讲解和自检问题，不更新本轮掌握度。学生提交作答或使用批改模式时，模型才返回掌握度、错因和缺漏点，后端将其作为结构化学习证据保存。
 
-学生端请求会自动带上当前登录学生账号作为 `student_id`，用于诊断回调同步学习画像、错题和会话记录。教师端请求会带上 `teacher_id/request_user_id/request_user_role`，并使用更明确的教师 schema：`task/task_type`、`class_id`、`selected_material_ids`、`selected_graph_id`、`selected_node_id`、`homework_id`、`student_submission_id`、`rubric`、`project_rag_context`、`project_class_context` 和 `output_format`。教师工作流返回应至少包含 `final_answer`、`task_type`、`structured_result`、`citations`、`warnings`、`follow_up_actions` 和 `teacher_review_required`。
-
-`DIFY_CALLBACK_TOKEN` 必须设置为强随机值；默认占位值和 `change-me` 会被后端视为未配置，Dify HTTP 回调将被拒绝。若 AI 助教返回 Dify HTTP 401，请检查 `.env` 中的 `DIFY_WORKFLOW_API_KEY` 是否来自已发布的 Dify 工作流 App。
-
-工作流的项目资料输入来自教师端上传并发布的课程资料和知识图谱：后端会把当前用户可见、且匹配学科的课程资料、图谱节点和错因资料以 `project_rag_context`、`project_misconception_context`、`project_mastery_context` 传给工作流，并额外传入 `assistant_task`、`assistant_role_context`、`project_class_context`。学生端会引用对应学科教师上传并发布给学生可见的资料；教师端会按“备课、出题、批改、学情分析、课堂生成”任务传入班级、资料、图谱、作业和提交上下文。教师工作流默认使用 `sync_mode=teacher-api-return`，不会调用现有学生诊断回调写入学生学习画像；即使批改任务绑定了学生提交，也只返回 AI 建议，最终成绩仍需教师在作业模块确认。
-
-新版学生诊断工作流内置“项目知识图谱数据库_HTTP节点”，会用 `DIFY_GRAPH_CONTEXT_URL` 和 `DIFY_CALLBACK_TOKEN` 直接调用项目后端 `/api/integrations/dify/graph-context`，按 `request_user_id`、`graph_id`、`node_id`、`knowledge_point` 查询当前用户可见的知识图谱数据库。Dify 内部知识库可以继续作为补充。Dify 工作流中的“项目数据库同步_HTTP节点”URL 应使用学生端请求传入的 `callback_url`；本地默认地址为 `http://127.0.0.1:5107`。
-
-```text
-POST http://127.0.0.1:5107/api/integrations/dify/diagnosis-callback
-Authorization: Bearer <DIFY_CALLBACK_TOKEN>
-Body: {"callback_payload":"{{#json_output.callback_payload#}}"}
-```
-
-手动测试学生诊断工作流或教师端调用时未填写学生 ID，项目会返回 `skipped: true`，不会让工作流失败；学生从前端 AI 助教触发时会自动带上学生 ID 并同步学习画像、错题和会话记录。
-
-从前端 AI 助教触发的请求会传入 `sync_mode=api-return`：前端 `/api/ai/chat` 负责保存本轮问答会话，Dify HTTP 回调负责同步结构化诊断结果、掌握度、错题和运行记录，并跳过重复会话写入。
+教师端教学工作流仍可继续使用 Dify，并保留 `DIFY_TEACHER_WORKFLOW_API_KEY` 与 `DIFY_CALLBACK_TOKEN` 配置；学生端不再读取 `DIFY_STUDENT_WORKFLOW_API_KEY`。
 
 图谱生成支持一次选择多个 PDF/TXT/EPUB/Markdown 文件。前端会逐个分块上传，后端在一个图谱任务中解析多个文件并汇总文本、文件名、OCR 结果和补充目录，最终生成一个融合图谱。
 
@@ -110,7 +102,7 @@ Body: {"callback_payload":"{{#json_output.callback_payload#}}"}
 - `data/db.json` 写入改为临时文件 + rename 的原子写入方式。
 - 上传会话和图谱生成任务持久化到 `data/runtime/`，服务重启后不会直接丢失任务状态。
 - 上传入口增加后端文件格式白名单和基础文件头校验，阻断可执行文件、脚本类文件和伪装格式。
-- 课程资料 RAG 增强为关键词召回 + 本地语义指纹 + 重排，回答引用来源更稳定。
+- 课程资料 RAG 支持 SQLite `knowledge_chunks` 向量表、OpenAI-compatible 真实 Embedding、关键词/知识图谱/掌握度混合召回；未配置 Embedding 服务时才兼容降级到本地哈希向量。
 - 作业批改增加 rubric 分项评分，AI 只生成建议分，教师确认后才成为正式成绩并更新学习画像。
 - 增加 `npm run backup`，可备份 `data/` 和 `logs/` 到 `backups/`。
 
@@ -146,6 +138,6 @@ npm run backup
 
 数据保存在 `data/db.json`，首次启动会自动生成演示数据。
 
-正式多班级、多学校长期运行前，仍建议把 `data/db.json` 迁移到 SQLite WAL 或 PostgreSQL，并引入任务队列、真实向量检索、真实 LLM、备份恢复、监控和端到端测试。发行路线和剩余清单见 [RELEASE_CHECKLIST.md](./RELEASE_CHECKLIST.md)。
+默认存储已切换为 SQLite WAL。学习事件、诊断结果、掌握度记录由独立数据表读写，课程片段向量保存在 `knowledge_chunks`，其余业务暂时保留在 `app_state`；当前仍采用全量对象读写接口，不等同于完成所有业务分表或解决多进程并发更新。SQLite 迁移见 `docs/SQLITE_MIGRATION.md`，Embedding 配置与索引重建见 `docs/EMBEDDING_RETRIEVAL.md`。正式多班级、多学校长期运行前，还需逐步拆分业务表并引入任务队列、监控和端到端测试。发行路线和剩余清单见 [RELEASE_CHECKLIST.md](./RELEASE_CHECKLIST.md)。
 
 说明：项目已忽略 `*.pdf`，避免把教材文件误提交到 GitHub。默认 AI 自动图谱智能体不限制总文件大小，但仍采用 6MB 分块上传和有限文本/OCR 处理来防止浏览器或后端崩溃；如需人为设置总上传上限，可配置 `MAX_UPLOAD_SIZE_BYTES`。扫描版 PDF 的高级 OCR 工具默认最多识别 80 页，其中优先识别前 40 页并抽样后续页面，可通过 `PDF_AGENT_OCR_MAX_PAGES`、`PDF_AGENT_OCR_LEADING_PAGES`、`PDF_AGENT_OCR_SCALE`、`PDF_AGENT_TIMEOUT_MS` 调整；AI 自动图谱智能体可通过 `AI_PDF_AGENT_OCR_MAX_PAGES`、`AI_PDF_AGENT_OCR_LEADING_PAGES`、`AI_PDF_AGENT_TIMEOUT_MS` 单独调节。

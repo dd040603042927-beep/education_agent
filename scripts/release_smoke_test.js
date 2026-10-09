@@ -59,6 +59,44 @@ function startMockDify() {
       const bodyText = Buffer.concat(chunks).toString("utf8");
       const body = bodyText ? JSON.parse(bodyText) : {};
       requests.push({ method: req.method, url: req.url, headers: req.headers, body });
+      if (req.method === "POST" && req.url === "/v1/embeddings") {
+        const inputs = Array.isArray(body.input) ? body.input : [body.input];
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data: inputs.map((input, index) => ({ index, embedding: [String(input || "").length, String(input || "").includes("KNN") ? 1 : 0, 1] })) }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/chat/completions") {
+        const answer = [
+          "## 直接回答",
+          "KNN 的核心思想是根据距离选择 K 个最近邻，分类时用投票、回归时用平均或加权平均完成预测。",
+          "",
+          "## 依据与例子",
+          "在特征尺度差异较大时，应先标准化，避免某个特征主导距离计算。",
+          "",
+          "## 易错提醒",
+          "KNN 是基于样本邻近关系的监督学习方法，不会通过训练阶段拟合显式参数。",
+          "",
+          "## 下一步自检问题",
+          "为什么 KNN 通常需要标准化？"
+        ].join("\n");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                answer,
+                topic_label: "KNN",
+                mastery_score: null,
+                mastery_level: "未诊断",
+                error_tags: [],
+                missing_points: [],
+                next_questions: ["为什么 KNN 通常需要标准化？"]
+              })
+            }
+          }]
+        }));
+        return;
+      }
       if (req.method !== "POST" || req.url !== "/v1/workflows/run") {
         res.writeHead(404, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: "not found" }));
@@ -213,6 +251,18 @@ async function waitForGraphJob(jobId, cookie) {
   throw new Error(`graph job ${jobId} did not complete`);
 }
 
+async function waitForBackgroundJob(jobId, cookie) {
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    const result = await request(`/api/jobs/${jobId}`, { cookie });
+    const job = result.payload.job;
+    if (job?.status === "complete") return job;
+    if (job?.status === "failed") throw new Error(job.error || "background job failed");
+    await sleep(250);
+  }
+  throw new Error(`background job ${jobId} did not complete`);
+}
+
 async function main() {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "education-agent-smoke-"));
   const mockDify = await startMockDify();
@@ -223,16 +273,26 @@ async function main() {
       PORT: String(PORT),
       HOST: "127.0.0.1",
       DATA_DIR: path.join(tempRoot, "data"),
+      STORAGE_DRIVER: process.env.TEST_STORAGE_DRIVER || "sqlite",
+      DATABASE_URL: path.join(tempRoot, "data", "education.db"),
       LOG_DIR: path.join(tempRoot, "logs"),
       BACKUP_DIR: path.join(tempRoot, "backups"),
       SESSION_SECRET: "release-smoke-test-secret",
       COOKIE_SECURE: "false",
       DIFY_BASE_URL: mockDify.baseUrl,
       DIFY_WORKFLOW_API_KEY: "app-smoke-test",
+      DIFY_STUDENT_WORKFLOW_API_KEY: "app-smoke-test",
       DIFY_TEACHER_WORKFLOW_API_KEY: "app-smoke-test",
       DIFY_PROJECT_BASE_URL: BASE_URL,
       DIFY_GRAPH_CONTEXT_URL: `${BASE_URL}/api/integrations/dify/graph-context`,
-      DIFY_CALLBACK_TOKEN: CALLBACK_TOKEN
+      DIFY_CALLBACK_TOKEN: CALLBACK_TOKEN,
+      OPENAI_API_KEY: "openai-smoke-key",
+      OPENAI_BASE_URL: mockDify.baseUrl,
+      OPENAI_MODEL: "smoke-chat-model",
+      EMBEDDING_PROVIDER: "openai",
+      EMBEDDING_API_KEY: "embedding-smoke-key",
+      EMBEDDING_BASE_URL: mockDify.baseUrl,
+      EMBEDDING_MODEL: "smoke-embedding"
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -244,6 +304,12 @@ async function main() {
 
   try {
     await waitForReady();
+
+    const health = await request("/api/healthz");
+    assert(health.payload.storageDriver === (process.env.TEST_STORAGE_DRIVER || "sqlite"), "health must report the selected storage driver");
+    if (health.payload.storageDriver === "sqlite") {
+      assert(health.payload.storagePath === path.join(tempRoot, "data", "education.db"), "SQLite smoke test must use its isolated database");
+    }
 
     const homepage = await requestText("/");
     assert(homepage.response.ok, "homepage should load");
@@ -428,56 +494,45 @@ async function main() {
         prompt: "KNN 的核心思想是什么？"
       }
     });
-    assert(publicMaterialChat.response.ok, "student AI chat should call the workflow");
+    assert(publicMaterialChat.response.ok, "student AI chat should call the backend model");
     const publicMaterialAssistant = publicMaterialChat.payload.messages?.find((message) => message.role === "assistant");
     const studentCitations = publicMaterialAssistant?.citations || [];
     const studentRetrieved = publicMaterialAssistant?.retrieved || [];
     assert(studentCitations.length > 0, "student AI chat should expose teacher-uploaded citation sources");
     assert(studentCitations.some((item) => item.subject === "机器学习" && item.global), "student AI chat citations should include visible machine learning teacher materials");
+    assert(studentCitations.every((item) => item.contentSha256 && item.verification?.status === "verified"), "local retrieval citations must include a verifiable source hash and exact-quote verification");
     assert(studentRetrieved.length > 0, "student AI chat should expose retrieved source chunks for citation display");
-    assert(publicMaterialAssistant?.workflow?.name?.includes("机器学习知识点问答"), "student AI chat should return the Dify diagnosis workflow trace");
+    assert(studentRetrieved.some((item) => item.scoreDetail?.embedding === true), "student retrieval should use the configured real embedding provider");
+    assert(publicMaterialAssistant?.workflow?.name === "学生画像驱动课程问答助手", "student AI chat should return the native model trace");
     const publicMaterialAnswer = String(publicMaterialAssistant?.content || "");
-    const expectedDifyFinalAnswer = [
-      "## 知识点定位",
-      "KNN（置信度 1）",
-      "",
-      "## 掌握度",
-      "未诊断，得分 0",
-      "",
-      "## 标准解释",
-      "KNN 的核心思想是根据距离找到最相似的 K 个训练样本，分类时多数投票，回归时取平均或加权平均。",
-      "",
-      "## 诊断反馈",
-      "未提供学生自我理解，当前为知识问答模式，暂不进行掌握度扣分诊断。",
-      "",
-      "## 追问题",
-      "1. KNN 为什么通常需要标准化？"
-    ].join("\n");
-    assert(publicMaterialAnswer === expectedDifyFinalAnswer, "student AI chat answer should exactly match Dify final_answer");
-    assert(publicMaterialAnswer.includes("## 知识点定位") && publicMaterialAnswer.includes("KNN"), "student AI chat answer should use the Dify final_answer topic section");
-    assert(publicMaterialAnswer.includes("## 掌握度") && publicMaterialAnswer.includes("未诊断，得分 0"), "student AI chat answer should use the Dify final_answer mastery section");
-    assert(publicMaterialAnswer.includes("## 标准解释"), "student AI chat answer should include the Dify standard explanation section");
-    assert(publicMaterialAnswer.includes("## 诊断反馈"), "student AI chat answer should include the Dify diagnosis feedback section");
-    assert(publicMaterialAnswer.includes("## 追问题"), "student AI chat answer should include the Dify follow-up question section");
-    assert(publicMaterialAssistant?.workflowResult?.topic_label === "KNN", "student AI chat should expose the structured Dify workflow result");
-    assert(publicMaterialAssistant?.workflowResult?.source === "dify-api", "student AI chat should call Dify workflow API when configured");
-    const difyRun = mockDify.requests.find((item) => item.method === "POST" && item.url === "/v1/workflows/run");
-    assert(difyRun, "mock Dify should receive the student workflow run");
-    assert(difyRun.headers.authorization === "Bearer app-smoke-test", "Dify workflow run should use the configured API key");
-    assert(difyRun.body.inputs?.student_id === newStudentId, "Dify workflow run should receive the logged-in student ID");
-    assert(difyRun.body.inputs?.sync_mode === "api-return", "Dify workflow run should use api-return sync mode from the project backend");
-    assert(difyRun.body.inputs?.request_user_id === newStudentId && difyRun.body.inputs?.request_user_role === "student", "Dify workflow run should receive request user metadata");
-    assert(difyRun.body.inputs?.assistant_task === "qa", "student workflow run should receive the AI assistant task mode");
-    assert(difyRun.body.inputs?.graph_context_url && difyRun.body.inputs?.graph_context_token, "Dify workflow run should receive the graph database query endpoint");
-    assert(difyRun.body.inputs?.callback_url?.includes("/api/integrations/dify/diagnosis-callback"), "Dify workflow run should receive the project callback endpoint");
-    const studentRoleContext = JSON.parse(difyRun.body.inputs.assistant_role_context || "{}");
-    const studentClassContext = JSON.parse(difyRun.body.inputs.project_class_context || "{}");
-    assert(studentRoleContext.request_user_role === "student" && studentRoleContext.assistant_task === "qa", "student workflow run should receive structured role context");
-    assert(studentClassContext.role === "student", "student workflow run should receive structured student class context");
-    const difyProjectDocs = JSON.parse(difyRun.body.inputs.project_rag_context || "[]");
-    const difyMasteryContext = JSON.parse(difyRun.body.inputs.project_mastery_context || "{}");
-    assert(difyProjectDocs.some((item) => item.subject === "机器学习" && item.global), "student workflow run should receive visible teacher course citation context");
-    assert(difyMasteryContext.student_id === newStudentId && difyMasteryContext.mastery, "Dify workflow run should receive the student's project mastery context");
+    assert(publicMaterialAnswer.includes("## 直接回答") && publicMaterialAnswer.includes("KNN"), "student AI chat should return the model answer");
+    assert(publicMaterialAnswer.includes("## 易错提醒") && publicMaterialAnswer.includes("## 下一步自检问题"), "student AI chat answer should retain the required learning structure");
+    assert(publicMaterialAssistant?.workflowResult?.topic_label, "student AI chat should expose a native structured topic result");
+    assert(publicMaterialAssistant?.workflowResult?.source === "native-openai-compatible", "student AI chat should use the backend direct model");
+    const nativeModelRun = mockDify.requests.find((item) => item.method === "POST" && item.url === "/v1/chat/completions");
+    assert(nativeModelRun, "mock model should receive the student chat completion");
+    assert(nativeModelRun.headers.authorization === "Bearer openai-smoke-key", "student model request should use OPENAI_API_KEY");
+    assert(nativeModelRun.body.model === "smoke-chat-model", "student model request should use OPENAI_MODEL");
+    const nativePrompt = nativeModelRun.body.messages?.map((item) => item.content).join("\n") || "";
+    assert(nativePrompt.includes("学生画像摘要"), "student model prompt should include the current learning profile");
+    assert(nativePrompt.includes("课程证据") && nativePrompt.includes("[S1]"), "student model prompt should include retrieved course evidence");
+
+    const queuedChat = await request("/api/ai/jobs", {
+      method: "POST",
+      cookie: newStudentCookie,
+      body: { userId: newStudentId, subject: "机器学习", mode: "qa", prompt: "KNN 为什么需要标准化？" }
+    });
+    assert(queuedChat.response.status === 202 && queuedChat.payload.job?.id, "AI requests should be accepted as recoverable background jobs");
+    const completedChat = await waitForBackgroundJob(queuedChat.payload.job.id, newStudentCookie);
+    assert(completedChat.result?.conversation?.id && completedChat.result?.messages?.some((message) => message.role === "assistant"), "completed AI job should persist and return its conversation result");
+
+    const blockedCheating = await request("/api/ai/chat", {
+      method: "POST",
+      cookie: newStudentCookie,
+      body: { userId: newStudentId, subject: "机器学习", mode: "qa", prompt: "请替我完成考试试卷" }
+    });
+    const blockedAnswer = blockedCheating.payload.messages?.find((message) => message.role === "assistant");
+    assert(blockedCheating.response.ok && blockedAnswer?.confidence === "blocked", "education safety routing should intercept academic-integrity requests");
 
     const beforeApiReturnCallbackState = await request("/api/state", { cookie: newStudentCookie });
     const beforeApiReturnConversationCount = beforeApiReturnCallbackState.payload.state.conversations.length;

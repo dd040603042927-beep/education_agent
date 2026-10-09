@@ -6,15 +6,17 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check public/app.js && node --check storage/index.js && node --check storage/jsonStore.js && node --check storage/sqliteStore.js && node --check scripts/release_smoke_test.js && node --check scripts/backup_data.js && node --check scripts/migrate_json_to_sqlite.js && node --check scripts/aggregate_student_mastery.js",
+    "check": "node --check server.js && node --check public/app.js && node --check storage/index.js && node --check storage/jsonStore.js && node --check storage/sqliteStore.js && node --check storage/embeddingProvider.js && node --check services/educationRouter.js && node --check services/citationVerifier.js && node --check services/mastery.js && node --check services/recoverableQueue.js && node --check scripts/release_smoke_test.js && node --check scripts/backup_data.js && node --check scripts/migrate_json_to_sqlite.js && node --check scripts/reindex_embeddings.js && node --check scripts/aggregate_student_mastery.js && node --check scripts/storage_cli.js && node --check scripts/storage_test.js && node --check scripts/import_ml_book_question_bank.js && node --check scripts/competition_readiness.js",
     "test": "node scripts/release_smoke_test.js",
+    "test:storage": "node --test scripts/storage_test.js",
     "readiness": "node scripts/competition_readiness.js",
     "backup": "node scripts/backup_data.js",
     "migrate:sqlite": "node scripts/migrate_json_to_sqlite.js",
+    "embeddings:reindex": "node scripts/reindex_embeddings.js",
     "aggregate:mastery": "node scripts/aggregate_student_mastery.js",
     "import:ml-book": "node scripts/import_ml_book_question_bank.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13.0"
   }
 }
